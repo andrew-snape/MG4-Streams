@@ -1,0 +1,283 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/bg">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:padding="16dp">
+
+        <!-- Top bar -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="88dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                android:id="@+id/tabRadio"
+                style="@style/TabButton"
+                android:text="Radio" />
+
+            <TextView
+                android:id="@+id/tabTv"
+                style="@style/TabButton"
+                android:text="TV" />
+
+            <TextView
+                android:id="@+id/tabMy"
+                style="@style/TabButton"
+                android:text="My list" />
+
+            <View
+                android:layout_width="0dp"
+                android:layout_height="1dp"
+                android:layout_weight="1" />
+
+            <EditText
+                android:id="@+id/searchInput"
+                android:layout_width="420dp"
+                android:layout_height="88dp"
+                android:background="@drawable/bg_search"
+                android:hint="Search"
+                android:imeOptions="actionSearch|flagNoExtractUi"
+                android:inputType="text"
+                android:paddingStart="32dp"
+                android:paddingEnd="32dp"
+                android:singleLine="true"
+                android:textColor="@color/text"
+                android:textColorHint="@color/text_dim"
+                android:textSize="26sp" />
+
+            <ImageButton
+                android:id="@+id/settingsButton"
+                android:layout_width="88dp"
+                android:layout_height="88dp"
+                android:layout_marginStart="12dp"
+                android:background="@drawable/bg_round_button"
+                android:contentDescription="Settings"
+                android:src="@drawable/ic_settings" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_marginTop="16dp"
+            android:layout_weight="1"
+            android:orientation="horizontal">
+
+            <!-- Now playing -->
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="0.62"
+                android:background="@drawable/bg_card"
+                android:orientation="vertical"
+                android:padding="24dp">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal">
+
+                    <FrameLayout
+                        android:id="@+id/mediaFrame"
+                        android:layout_width="300dp"
+                        android:layout_height="300dp"
+                        android:background="@drawable/bg_tile">
+
+                        <ImageView
+                            android:id="@+id/logoView"
+                            android:layout_width="match_parent"
+                            android:layout_height="match_parent"
+                            android:padding="20dp"
+                            android:scaleType="fitCenter" />
+
+                        <androidx.media3.ui.PlayerView
+                            android:id="@+id/playerView"
+                            android:layout_width="match_parent"
+                            android:layout_height="match_parent"
+                            android:visibility="gone"
+                            app:resize_mode="fit"
+                            app:use_controller="false" />
+                    </FrameLayout>
+
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="24dp"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+
+                        <TextView
+                            android:id="@+id/stationGroup"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:singleLine="true"
+                            android:textColor="@color/accent"
+                            android:textSize="20sp"
+                            android:textStyle="bold" />
+
+                        <TextView
+                            android:id="@+id/stationName"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:ellipsize="end"
+                            android:maxLines="2"
+                            android:text="Pick a station"
+                            android:textColor="@color/text"
+                            android:textSize="42sp"
+                            android:textStyle="bold" />
+
+                        <TextView
+                            android:id="@+id/nowText"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="8dp"
+                            android:ellipsize="end"
+                            android:maxLines="3"
+                            android:textColor="@color/text_dim"
+                            android:textSize="24sp" />
+
+                        <TextView
+                            android:id="@+id/bannerText"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="12dp"
+                            android:background="@drawable/bg_banner"
+                            android:ellipsize="end"
+                            android:maxLines="3"
+                            android:padding="14dp"
+                            android:textColor="@color/warn"
+                            android:textSize="22sp"
+                            android:visibility="gone" />
+                    </LinearLayout>
+                </LinearLayout>
+
+                <View
+                    android:layout_width="match_parent"
+                    android:layout_height="0dp"
+                    android:layout_weight="1" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center"
+                    android:orientation="horizontal">
+
+                    <ImageButton
+                        android:id="@+id/starButton"
+                        style="@style/RoundControl"
+                        android:contentDescription="Favourite"
+                        android:src="@drawable/ic_star_border" />
+
+                    <ImageButton
+                        android:id="@+id/prevButton"
+                        style="@style/RoundControl"
+                        android:contentDescription="Previous"
+                        android:src="@drawable/ic_prev" />
+
+                    <ImageButton
+                        android:id="@+id/playButton"
+                        android:layout_width="120dp"
+                        android:layout_height="120dp"
+                        android:layout_margin="12dp"
+                        android:background="@drawable/bg_play"
+                        android:contentDescription="Play or stop"
+                        android:src="@drawable/ic_play" />
+
+                    <ImageButton
+                        android:id="@+id/nextButton"
+                        style="@style/RoundControl"
+                        android:contentDescription="Next"
+                        android:src="@drawable/ic_next" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <!-- Station grid -->
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_marginStart="16dp"
+                android:layout_weight="0.38"
+                android:background="@drawable/bg_card"
+                android:orientation="vertical"
+                android:padding="16dp">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="88dp"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <TextView
+                        android:id="@+id/gridTitle"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:singleLine="true"
+                        android:textColor="@color/text_dim"
+                        android:textSize="20sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:id="@+id/favsToggle"
+                        style="@style/TabButton"
+                        android:layout_width="120dp"
+                        android:layout_marginEnd="8dp"
+                        android:text="Favs" />
+
+                    <TextView
+                        android:id="@+id/allToggle"
+                        style="@style/TabButton"
+                        android:layout_width="100dp"
+                        android:layout_marginEnd="0dp"
+                        android:text="All" />
+                </LinearLayout>
+
+                <FrameLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="0dp"
+                    android:layout_weight="1">
+
+                    <GridView
+                        android:id="@+id/stationGrid"
+                        android:layout_width="match_parent"
+                        android:layout_height="match_parent"
+                        android:horizontalSpacing="10dp"
+                        android:numColumns="3"
+                        android:scrollbars="none"
+                        android:stretchMode="columnWidth"
+                        android:verticalSpacing="10dp" />
+
+                    <TextView
+                        android:id="@+id/emptyText"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_gravity="center"
+                        android:gravity="center"
+                        android:padding="24dp"
+                        android:textColor="@color/text_dim"
+                        android:textSize="22sp"
+                        android:visibility="gone" />
+                </FrameLayout>
+            </LinearLayout>
+        </LinearLayout>
+    </LinearLayout>
+
+    <!-- Full-screen video. Shown only while parked; hidden at once when the gate closes. -->
+    <androidx.media3.ui.PlayerView
+        android:id="@+id/fullPlayerView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#000000"
+        android:clickable="true"
+        android:focusable="true"
+        android:visibility="gone"
+        app:resize_mode="fit"
+        app:use_controller="false" />
+</FrameLayout>

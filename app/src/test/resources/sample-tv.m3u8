@@ -1,0 +1,11 @@
+#EXTM3U x-tvg-url="https://example.com/epg.xml.gz"
+
+#EXTINF:-1 channel-id="ch-one" tvg-id="ch-one" tvg-logo="https://example.com/one.png" group-title="Local" , Channel One
+#EXTVLCOPT:http-user-agent=ExampleAgent/1.0 (TV)
+#EXTVLCOPT:http-referrer=
+https://example.com/live/one.m3u8
+
+#EXTINF:-1 channel-id="ch-two" tvg-id="ch-two" tvg-logo="https://example.com/two.png" group-title="Local" , Channel Two
+#EXTVLCOPT:http-user-agent=ExampleAgent/1.0 (TV)
+#EXTVLCOPT:http-referrer=https://example.com/
+https://example.com/live/two.m3u8
