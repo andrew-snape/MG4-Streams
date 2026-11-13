@@ -214,12 +214,20 @@ class PlaybackService : MediaSessionService() {
         else -> false
     }
 
+    private fun describeUri(uri: android.net.Uri): String {
+        val host = uri.host ?: "?"
+        val file = uri.lastPathSegment?.substringAfterLast('.', "")?.take(5)?.ifEmpty { null }
+        return if (file != null) "$host, .$file" else host
+    }
+
     private fun describe(error: PlaybackException): String {
         var cause: Throwable? = error.cause
         while (cause != null) {
             when (cause) {
                 is HttpDataSource.InvalidResponseCodeException ->
-                    return "server refused (HTTP ${cause.responseCode})"
+                    // Name the server and file type, so it's clear which step was refused
+                    // (playlist host, ad server, video CDN, subtitles).
+                    return "server refused (HTTP ${cause.responseCode} from ${describeUri(cause.dataSpec.uri)})"
                 is UnknownHostException -> return "no internet (can't find server)"
                 is SocketTimeoutException -> return "connection timed out"
             }
