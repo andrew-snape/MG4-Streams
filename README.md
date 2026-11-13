@@ -7,14 +7,21 @@ Unofficial. Not affiliated with MG or SAIC. Use at your own risk.
 ## Features
 
 - **Three playlists, one per tab:** Radio, TV and My list. Each is added from a URL, imported from a file, or set up from a text file of addresses on a USB stick. URLs are saved and updated once a day, or on demand.
-- **Updates itself from GitHub:** checks this repo's latest release once a day and installs it from Settings.
+- **Updates from GitHub:** checks this repo's latest release once a day. Settings downloads it to Downloads; tap it there to install.
 - **Big, car-sized controls:** a now-playing panel with logo, name and song or programme, and a large Play/Stop button. A logo grid with favourites (long-press a station to add it).
 - **Steering-wheel keys:** previous/next step through the list on screen, via the media session.
 - **Takes over the audio:** starting a stream asks Android for audio focus, so the built-in FM/DAB tuner and Bluetooth audio stop.
 - **TV guide (EPG):** read from the playlist's `x-tvg-url` (XMLTV, gzip or plain). Shows now/next for each channel.
 - **Per-channel headers:** `#EXTVLCOPT:http-user-agent` / `http-referrer` and Kodi-style `URL|User-Agent=...` are sent on every request, including HLS segments.
 - **Reconnects by itself:** waits for the network at car start (for example before a phone hotspot connects), and retries dropped or expired streams.
-- **Remembers** the last station, with optional auto-resume on start.
+- **Driving mode:** whenever the car isn't in P, the grid, search and settings disappear. Six big presets (favourites, then recently played), larger text and buttons. Previous/next step through the presets. Swipe the logo to change station.
+- **Parked extras:** 640 × 360 video, group chips for TV, a programme progress bar, 3 or 5 column grid, Favs / Recent / All.
+- **Connection chip and Retry:** shows Car internet / Wi-Fi / Offline / Reconnecting; a Retry button after a failure, with a hint when a channel blocks the car's internet.
+- **Data use:** today and this month, by connection, in Settings.
+- **Arrange presets:** Settings > Arrange presets sets the order of favourites; the first six are the driving presets.
+- **Skips dead stations:** a station that fails today on the current connection is greyed out and skipped by previous/next (screen and steering wheel). Tapping it still tries it. Playing it successfully clears it.
+- **Album art:** for songs ("Artist - Song" stream titles) the cover is looked up on Apple's iTunes Search and shown instead of the logo, and in the media notification. Only the song title is sent. Off switch in Settings.
+- **Remembers** the last station and resumes it on start (on by default; never TV). Night dim from 7 pm to 6 am.
 
 ## Safety
 
@@ -81,19 +88,20 @@ Updates must be signed with the same key.
 
 Settings > **Check for app updates** looks at the latest release of this repo (set in `app/build.gradle.kts` as `UPDATE_REPO`; change it in a fork). The app also checks quietly once a day and shows a message when there's a new version.
 
-Before installing, the app checks that the download is the same app, has a higher `versionCode`, and is **signed with the same key** as the installed copy. A platform-signed build installs without a prompt. Otherwise Android shows its install screen.
+The head unit refuses installs started by the app itself ("not a system app"), so the app downloads the APK with DownloadManager into **Downloads** (`MG4Streams-<version>.apk`), checks it, then opens Downloads. Tap the file and choose Install. The first time, the app asks for storage permission so the file goes in the public Downloads folder; without it, the file goes in the app's own folder (whether the Downloads screen lists it there is still to check on the car).
+
+Before opening Downloads, the app checks that the file is the same app, has a higher `versionCode`, and is **signed with the same key** as the installed copy. A file that fails is deleted.
 
 ### Publishing a release
 
-1. Bump `versionCode` and `versionName` in `app/build.gradle.kts`.
-2. Build and sign as above.
-3. Create a GitHub release whose tag matches the version and attach the signed APK:
+```sh
+scripts/release.sh 0.5.0                 # bump, test, build (R8, ~2.7 MB), platform-sign, check cert, ask, publish
+scripts/release.sh 0.5.0 --no-publish    # stop after dist/MG4Streams-0.5.0-platform.apk
+```
 
-   ```sh
-   gh release create v0.2.0 MG4Streams-platform.apk --title "v0.2.0" --notes "What changed"
-   ```
+The script expects the platform key in `~/Documents/GitHub/DiPlay-MG4/tools` and refuses to continue if the signing certificate isn't the one the head unit has. Release notes come from `dist/notes-<version>.md`, or one line typed at the prompt. It asks before running `gh release create`.
 
-The app offers a release when its tag is higher than the installed `versionName` (`v0.3.0` > `0.2.0`), and only installs it if the APK's `versionCode` is also higher, so bump both. It uses the first `.apk` attached to the release.
+The release build uses R8 (`isMinifyEnabled`, `isShrinkResources`): unused code from Media3, Guava and Kotlin, and unused resources, are removed. 14 MB debug, about 2.7 MB release.
 
 ## Code layout
 
@@ -109,7 +117,9 @@ The app offers a release when its tag is higher than the installed `versionName`
 | `Epg.kt` | XMLTV guide download, filter and cache |
 | `StationLists.kt`, `Favourites.kt`, `LogoLoader.kt` | List filtering, favourites, logo cache |
 | `UrlListParser.kt` | Address-list `.txt` import |
-| `Updater.kt` | GitHub release check, download, signature check, install |
+| `DataUsage.kt`, `Net.kt` | Data-use counter by connection; connection type |
+| `Updater.kt` | GitHub release check, download to Downloads, signature check |
+| `NetCheck.kt` | Settings > Network check: connection, public address, and a step-by-step stream test |
 
 ## Licence
 

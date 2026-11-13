@@ -18,6 +18,8 @@ import android.widget.EditText
 import android.widget.GridView
 import android.widget.ImageButton
 import android.widget.ImageView
+import android.widget.LinearLayout
+import android.widget.ProgressBar
 import android.widget.FrameLayout
 import android.widget.Switch
 import android.widget.TextView
@@ -64,7 +66,21 @@ class MainActivity : ComponentActivity() {
     private lateinit var gridTitle: TextView
     private lateinit var tabViews: Map<Tab, TextView>
     private lateinit var favsToggle: TextView
+    private lateinit var recentToggle: TextView
     private lateinit var allToggle: TextView
+    private lateinit var densityButton: TextView
+    private lateinit var driveTitle: TextView
+    private lateinit var connChip: TextView
+    private lateinit var gridCard: View
+    private lateinit var presetRow: LinearLayout
+    private lateinit var presetEmpty: TextView
+    private lateinit var guideProgress: ProgressBar
+    private lateinit var retryButton: TextView
+    private lateinit var groupScroll: View
+    private lateinit var groupChips: LinearLayout
+    private lateinit var dimOverlay: View
+    private lateinit var prevButton: ImageButton
+    private lateinit var nextButton: ImageButton
 
     private var controllerFuture: ListenableFuture<MediaController>? = null
     private var controller: MediaController? = null
@@ -112,12 +128,37 @@ class MainActivity : ComponentActivity() {
     private var tab = Tab.RADIO
     private var query = ""
     private val favourites = LinkedHashSet<String>()
-    private var favouritesOnly = false
-    private var favouritesChosen = false
+    private var filter = Filter.ALL
+    private var filterChosen = false
+    /** Group-title chip selected in the grid; null = all groups. Reset on tab change. */
+    private var groupFilter: String? = null
+    /** Recently played URLs, newest first (all tabs). */
+    private var recents: List<String> = emptyList()
+    private var compactGrid = false
     private var shown: List<Channel> = emptyList()
+    /** The driving-mode preset row. */
+    private var presets: List<Channel> = emptyList()
+    private var shownPresetUrls: List<String>? = null
+    private var presetKey: Pair<List<String>, Int>? = null
     private var playingUrl: String? = null
     private lateinit var favStore: FavouritesStore
+    /** Stations that failed today on this connection: greyed out, skipped by previous/next. */
+    private var dead: Set<String> = emptySet()
+    private val deadListener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
+        handler.post { refreshDead() }
+    }
+    /** Cover art: separate cache in cacheDir (many small images), pruned at start. */
+    private lateinit var artLoader: LogoLoader
     private val adapter = StationAdapter()
+    /** Driving layout: shown whenever video is not allowed (not P, or gear unknown). */
+    private var drivingUi: Boolean? = null
+    private var netKind = NetKind.NONE
+    private lateinit var connectivity: android.net.ConnectivityManager
+    private val netCallback = object : android.net.ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: android.net.Network) = netChanged()
+        override fun onLost(network: android.net.Network) = netChanged()
+        override fun onCapabilitiesChanged(network: android.net.Network, caps: android.net.NetworkCapabilities) = netChanged()
+    }
 
     private var fullscreen = false
     private var settingsDialog: AlertDialog? = null
@@ -129,10 +170,11 @@ class MainActivity : ComponentActivity() {
         override fun handleOnBackPressed() = exitFullscreen()
     }
 
-    /** Updates the guide text once a minute. */
+    /** Once a minute: guide text and progress, night dim. */
     private val guideTick = object : Runnable {
         override fun run() {
             if (!guide.isEmpty) updateStatus()
+            updateDim()
             handler.postDelayed(this, 60_000L)
         }
     }
@@ -175,20 +217,21 @@ class MainActivity : ComponentActivity() {
         uri?.let { importUrlList(it, importSlot) }
     }
 
-    private val updater by lazy { Updater(this) }
+    private val updater by lazy { Updater(applicationContext) }
     private var updateRunning = false
-    /** Update check, download and install, so they never hold up playlist work on [worker]. */
+    /** Update check and download, so they never hold up playlist work on [worker]. */
     private val updateThread = Executors.newSingleThreadExecutor()
+    /** The release waiting for the storage permission answer. */
+    private var pendingRelease: Updater.Release? = null
 
-    /** Gives up waiting for an install result (e.g. the install screen was backed out of). */
-    private val installTimeout = Runnable {
-        if (updateRunning) {
-            updater.cancelPending()
-            updateRunning = false
-            message = "Update didn't finish. Try again from Settings."
-            updateStatus()
+    /** Storage permission puts the update in the public Downloads folder; without it, the app's own. */
+    private val storagePermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { _ ->
+            pendingRelease?.let { release ->
+                pendingRelease = null
+                downloadUpdate(release)
+            }
         }
-    }
 
     private val controllerListener = object : Player.Listener {
         override fun onMediaMetadataChanged(mediaMetadata: MediaMetadata) {
@@ -204,7 +247,10 @@ class MainActivity : ComponentActivity() {
             nowPlaying = null
             message = null
             adoptItem(mediaItem)
-            urlOf(mediaItem)?.let { prefs.edit().putString(PREF_LAST_URL, it).apply() }
+            urlOf(mediaItem)?.let {
+                prefs.edit().putString(PREF_LAST_URL, it).apply()
+                addRecent(it)
+            }
             updateStatus()
         }
 
@@ -253,6 +299,11 @@ class MainActivity : ComponentActivity() {
         epgStore = EpgStore(File(filesDir, "epg.tsv"))
         favStore = FavouritesStore(File(filesDir, "favourites.txt"))
         logoLoader = LogoLoader(File(filesDir, "logos"), logoThreads, handler)
+        val artDir = File(cacheDir, "art")
+        artLoader = LogoLoader(artDir, logoThreads, handler)
+        worker.execute { pruneArt(artDir) }
+        DeadStations.prefs(this).registerOnSharedPreferenceChangeListener(deadListener)
+        dead = DeadStations.current(this)
 
         playerView = findViewById(R.id.playerView)
         fullPlayerView = findViewById(R.id.fullPlayerView)
@@ -270,7 +321,21 @@ class MainActivity : ComponentActivity() {
         emptyText = findViewById(R.id.emptyText)
         gridTitle = findViewById(R.id.gridTitle)
         favsToggle = findViewById(R.id.favsToggle)
+        recentToggle = findViewById(R.id.recentToggle)
         allToggle = findViewById(R.id.allToggle)
+        densityButton = findViewById(R.id.densityButton)
+        driveTitle = findViewById(R.id.driveTitle)
+        connChip = findViewById(R.id.connChip)
+        gridCard = findViewById(R.id.gridCard)
+        presetRow = findViewById(R.id.presetRow)
+        presetEmpty = findViewById(R.id.presetEmpty)
+        guideProgress = findViewById(R.id.guideProgress)
+        retryButton = findViewById(R.id.retryButton)
+        groupScroll = findViewById(R.id.groupScroll)
+        groupChips = findViewById(R.id.groupChips)
+        dimOverlay = findViewById(R.id.dimOverlay)
+        prevButton = findViewById(R.id.prevButton)
+        nextButton = findViewById(R.id.nextButton)
         tabViews = mapOf(
             Tab.RADIO to findViewById(R.id.tabRadio),
             Tab.TV to findViewById(R.id.tabTv),
@@ -278,18 +343,31 @@ class MainActivity : ComponentActivity() {
         )
 
         tab = Tab.fromName(prefs.getString(PREF_TAB, null))
-        favouritesChosen = prefs.contains(PREF_FAVS_ONLY)
-        favouritesOnly = prefs.getBoolean(PREF_FAVS_ONLY, false)
+        // Older versions saved a favourites-only boolean; keep honouring it.
+        val savedFilter = Filter.fromName(prefs.getString(PREF_FILTER, null))
+        filterChosen = savedFilter != null || prefs.contains(PREF_FAVS_ONLY)
+        filter = savedFilter ?: if (prefs.getBoolean(PREF_FAVS_ONLY, false)) Filter.FAVOURITES else Filter.ALL
+        recents = prefs.getString(PREF_RECENTS, null).orEmpty().lines().filter { it.isNotBlank() }
+        compactGrid = prefs.getBoolean(PREF_COMPACT, false)
+        applyDensity()
 
         tabViews.forEach { (t, view) ->
             view.setOnClickListener {
                 tab = t
+                groupFilter = null
                 prefs.edit().putString(PREF_TAB, t.name).apply()
                 refreshShown()
             }
         }
-        favsToggle.setOnClickListener { chooseFavouritesOnly(true) }
-        allToggle.setOnClickListener { chooseFavouritesOnly(false) }
+        favsToggle.setOnClickListener { chooseFilter(Filter.FAVOURITES) }
+        recentToggle.setOnClickListener { chooseFilter(Filter.RECENT) }
+        allToggle.setOnClickListener { chooseFilter(Filter.ALL) }
+        densityButton.setOnClickListener {
+            compactGrid = !compactGrid
+            prefs.edit().putBoolean(PREF_COMPACT, compactGrid).apply()
+            applyDensity()
+        }
+        retryButton.setOnClickListener { retry() }
 
         stationGrid.adapter = adapter
         stationGrid.setOnItemClickListener { _, _, position, _ ->
@@ -317,18 +395,35 @@ class MainActivity : ComponentActivity() {
         settingsButton.setOnClickListener { showSettings() }
 
         playButton.setOnClickListener { if (isPlayingUi()) stopPlayback() else resume() }
-        findViewById<ImageButton>(R.id.prevButton).setOnClickListener { stepStation(-1) }
-        findViewById<ImageButton>(R.id.nextButton).setOnClickListener { stepStation(1) }
+        prevButton.setOnClickListener { stepStation(-1) }
+        nextButton.setOnClickListener { stepStation(1) }
         starButton.setOnClickListener { currentChannel?.let { toggleFavourite(it) } }
         // PlayerView ignores clicks when its controller is off, so use a touch listener.
         playerView.setOnTouchListener(tapListener { enterFullscreen() })
         fullPlayerView.setOnTouchListener(tapListener { exitFullscreen() })
+        // Swipe the logo left/right for the next/previous station.
+        val swipe = android.view.GestureDetector(this, object : android.view.GestureDetector.SimpleOnGestureListener() {
+            override fun onDown(e: MotionEvent) = true
+            override fun onFling(e1: MotionEvent?, e2: MotionEvent, vx: Float, vy: Float): Boolean {
+                val dx = e2.x - (e1?.x ?: return false)
+                if (Math.abs(dx) < SWIPE_MIN_PX || Math.abs(vx) < Math.abs(vy)) return false
+                stepStation(if (dx < 0) 1 else -1)
+                return true
+            }
+        })
+        @Suppress("ClickableViewAccessibility")
+        logoView.setOnTouchListener { _, event -> swipe.onTouchEvent(event) }
+
+        connectivity = getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+        runCatching { connectivity.registerDefaultNetworkCallback(netCallback, handler) }
+        netKind = NetKind.current(this)
 
         updateParkedUi()
         gearGate.connect(this)
         loadFavourites()
         loadPlaylists()
         updateStatus()
+        updateDim()
     }
 
     override fun onStart() {
@@ -336,6 +431,29 @@ class MainActivity : ComponentActivity() {
         gateGeneration++
         setVideoAllowed(false)
         connectToService()
+    }
+
+    private fun netChanged() {
+        val kind = NetKind.current(this)
+        if (kind == netKind) return
+        netKind = kind
+        refreshDead()
+        updateStatus()
+    }
+
+    /** Re-reads the dead stations (they depend on the connection) and greys tiles to match. */
+    private fun refreshDead() {
+        val now = DeadStations.current(this)
+        if (now == dead) return
+        dead = now
+        adapter.notifyDataSetChanged()
+        markPresets()
+    }
+
+    /** Keeps the newest cover images only. */
+    private fun pruneArt(dir: File) {
+        val files = dir.listFiles()?.sortedByDescending { it.lastModified() } ?: return
+        files.drop(MAX_ART_FILES).forEach { it.delete() }
     }
 
     override fun onResume() {
@@ -360,6 +478,8 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        runCatching { connectivity.unregisterNetworkCallback(netCallback) }
+        DeadStations.prefs(this).unregisterOnSharedPreferenceChangeListener(deadListener)
         handler.removeCallbacks(pollGate)
         handler.removeCallbacks(guideTick)
         settingsDialog?.dismiss()
@@ -373,7 +493,6 @@ class MainActivity : ComponentActivity() {
         gearThread.shutdownNow()
         guideThread.shutdownNow()
         updateThread.shutdownNow()
-        handler.removeCallbacks(installTimeout)
         logoThreads.shutdownNow()
         super.onDestroy()
     }
@@ -443,8 +562,14 @@ class MainActivity : ComponentActivity() {
         currentChannel = channel
         currentChannelName = channel.name
         currentTvgId = channel.tvgId
-        if (prefs.getBoolean(PREF_AUTO_RESUME, false)) playChannel(channel) else updateStatus()
+        // Auto-resume is on by default, but never for TV (a car start shouldn't start TV audio).
+        val resume = prefs.getBoolean(PREF_AUTO_RESUME, true) && StationLists.tabOf(channel) != Tab.TV
+        if (resume) playChannel(channel, presetsOrNull(channel)) else updateStatus()
     }
+
+    /** The preset list if [channel] is in it (so steering-wheel next/previous steps presets). */
+    private fun presetsOrNull(channel: Channel): List<Channel>? =
+        presets.takeIf { list -> drivingUi == true && list.any { it.url == channel.url } }
 
     // ---- Lists, tabs, favourites -------------------------------------------------------------
 
@@ -456,17 +581,17 @@ class MainActivity : ComponentActivity() {
                 favourites.clear()
                 favourites.addAll(loaded)
                 // Default to Favourites once there are any, until the user chooses.
-                if (!favouritesChosen) favouritesOnly = favourites.isNotEmpty()
+                if (!filterChosen) filter = if (favourites.isNotEmpty()) Filter.FAVOURITES else Filter.ALL
                 refreshShown()
                 updateStatus()
             }
         }
     }
 
-    private fun chooseFavouritesOnly(only: Boolean) {
-        favouritesOnly = only
-        favouritesChosen = true
-        prefs.edit().putBoolean(PREF_FAVS_ONLY, only).apply()
+    private fun chooseFilter(newFilter: Filter) {
+        filter = newFilter
+        filterChosen = true
+        prefs.edit().putString(PREF_FILTER, newFilter.name).apply()
         refreshShown()
     }
 
@@ -480,23 +605,174 @@ class MainActivity : ComponentActivity() {
         updateStatus()
     }
 
-    /** Recomputes the grid from the tab, search text and favourites filter. */
-    private fun refreshShown() {
-        shown = StationLists.filter(channels, tab, query, favourites, favouritesOnly)
+    private fun addRecent(url: String) {
+        if (recents.firstOrNull() == url) return
+        recents = StationLists.pushRecent(recents, url)
+        prefs.edit().putString(PREF_RECENTS, recents.joinToString("\n")).apply()
+        if (filter == Filter.RECENT && drivingUi != true) refreshShown()
+    }
+
+    private fun applyDensity() {
+        stationGrid.numColumns = if (compactGrid) 5 else 3
+        densityButton.text = if (compactGrid) "3×" else "5×"
         adapter.notifyDataSetChanged()
-        tabViews.forEach { (t, view) -> view.isSelected = t == tab }
-        favsToggle.isSelected = favouritesOnly
-        allToggle.isSelected = !favouritesOnly
-        gridTitle.text = "${tab.label.uppercase()} · ${if (favouritesOnly) "FAVOURITES" else "ALL"}"
+    }
+
+    /** Recomputes the grid (and the preset row) from the tab, search, filter and group. */
+    private fun refreshShown() {
+        val groups = if (filter == Filter.RECENT) emptyList() else StationLists.groups(channels, tab)
+        if (groupFilter != null && groupFilter !in groups) groupFilter = null
+        shown = StationLists.filter(channels, tab, query, favourites, filter, recents, groupFilter)
+        adapter.notifyDataSetChanged()
+        tabViews.forEach { (t, view) -> view.isSelected = t == tab && filter != Filter.RECENT }
+        favsToggle.isSelected = filter == Filter.FAVOURITES
+        recentToggle.isSelected = filter == Filter.RECENT
+        allToggle.isSelected = filter == Filter.ALL
+        gridTitle.text = if (filter == Filter.RECENT) "RECENT · ALL TABS"
+        else "${tab.label.uppercase()} · ${filter.label}" + (groupFilter?.let { " · ${it.uppercase()}" } ?: "")
+        updateGroupChips(groups)
         val empty = when {
             shown.isNotEmpty() -> null
             !listsLoaded -> "Loading stations..."
             query.isNotBlank() -> "No stations match \"${query.trim()}\""
-            favouritesOnly -> "No favourites here yet.\nLong-press a station to add one."
+            filter == Filter.RECENT -> "Nothing played yet."
+            filter == Filter.FAVOURITES -> "No favourites here yet.\nLong-press a station to add one."
             else -> "No ${tab.label} playlist yet.\nAdd one in Settings (when parked)."
         }
         emptyText.text = empty.orEmpty()
         emptyText.visibility = if (empty == null) View.GONE else View.VISIBLE
+        refreshPresets()
+    }
+
+    /** Group chips above the grid when the tab has two or more groups. */
+    private fun updateGroupChips(groups: List<String>) {
+        if (groups.size < 2) {
+            groupScroll.visibility = View.GONE
+            groupChips.removeAllViews()
+            return
+        }
+        groupScroll.visibility = View.VISIBLE
+        groupChips.removeAllViews()
+        (listOf<String?>(null) + groups).forEach { group ->
+            val chip = TextView(this).apply {
+                text = group ?: "All groups"
+                textSize = 20f
+                setTextColor(getColor(R.color.text))
+                gravity = android.view.Gravity.CENTER
+                setPadding(28, 0, 28, 0)
+                setBackgroundResource(R.drawable.bg_tab)
+                isSelected = group == groupFilter
+                setOnClickListener {
+                    groupFilter = group
+                    refreshShown()
+                }
+            }
+            groupChips.addView(chip, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, 56).apply { marginEnd = 10 })
+        }
+    }
+
+    /** The six driving-mode presets: favourites (any tab), then recently played. */
+    private fun refreshPresets() {
+        // While driving, keep the row's order fixed: recents reorder on every station change,
+        // which would move tiles under the driver's finger and break next/previous. Recompute
+        // only when parked, when favourites change, or when the playlists change.
+        val key = favourites.toList() to channels.size
+        if (drivingUi != true || presets.isEmpty() || key != presetKey) {
+            presets = StationLists.presets(channels, favourites, recents, PRESET_COUNT)
+            presetKey = key
+        }
+        val urls = presets.map { it.url }
+        if (urls != shownPresetUrls) {
+            shownPresetUrls = urls
+            presetRow.removeAllViews()
+            val inflater = LayoutInflater.from(this)
+            presets.forEach { channel ->
+                val tile = inflater.inflate(R.layout.item_preset, presetRow, false)
+                tile.findViewById<TextView>(R.id.presetName).text = channel.name
+                logoLoader.load(channel.logo, tile.findViewById(R.id.presetLogo))
+                tile.setOnClickListener { playChannel(channel, presets) }
+                tile.tag = channel.url
+                presetRow.addView(tile)
+            }
+        }
+        markPresets()
+        updateDrivingUi()
+    }
+
+    /** Highlights the playing preset and greys out dead ones. */
+    private fun markPresets() {
+        for (i in 0 until presetRow.childCount) {
+            val tile = presetRow.getChildAt(i)
+            tile.isSelected = tile.tag == playingUrl
+            tile.alpha = if (tile.tag in dead && tile.tag != playingUrl) DEAD_ALPHA else 1f
+        }
+    }
+
+    /**
+     * Settings > Arrange presets: favourites in order; the first six are the driving presets.
+     * Up/down moves a station; the order is saved with the favourites.
+     */
+    private fun showArrangePresets() {
+        val order = favourites.toMutableList()
+        if (order.isEmpty()) {
+            Toast.makeText(this, "No favourites yet. Long-press a station to add one.", Toast.LENGTH_LONG).show()
+            return
+        }
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(24, 8, 24, 8) }
+        val scroll = android.widget.ScrollView(this).apply { addView(list) }
+        fun save() {
+            favourites.clear()
+            favourites.addAll(order)
+            val snapshot = order.toList()
+            worker.execute { runCatching { favStore.save(snapshot) } }
+            refreshPresets()
+            refreshShown()
+        }
+        fun render() {
+            list.removeAllViews()
+            order.forEachIndexed { i, url ->
+                val row = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = android.view.Gravity.CENTER_VERTICAL
+                }
+                val label = TextView(this).apply {
+                    val name = channelsByUrl[url]?.name ?: url.substringAfter("://").take(40)
+                    text = if (i < PRESET_COUNT) "${i + 1}.  $name" else "     $name"
+                    textSize = 22f
+                    setTextColor(getColor(if (i < PRESET_COUNT) R.color.text else R.color.text_dim))
+                    maxLines = 1
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                }
+                row.addView(label, LinearLayout.LayoutParams(0, 88, 1f))
+                fun arrow(textValue: String, enabled: Boolean, move: Int) = Button(this).apply {
+                    text = textValue
+                    textSize = 26f
+                    isEnabled = enabled
+                    setOnClickListener {
+                        java.util.Collections.swap(order, i, i + move)
+                        render()
+                        save()
+                    }
+                }
+                row.addView(arrow("▲", i > 0, -1), LinearLayout.LayoutParams(110, 88))
+                row.addView(arrow("▼", i < order.size - 1, 1), LinearLayout.LayoutParams(110, 88))
+                list.addView(row)
+                if (i == PRESET_COUNT - 1 && order.size > PRESET_COUNT) {
+                    list.addView(TextView(this).apply {
+                        text = "Not in the preset row:"
+                        textSize = 18f
+                        setTextColor(getColor(R.color.text_dim))
+                        setPadding(0, 16, 0, 8)
+                    })
+                }
+            }
+        }
+        render()
+        AlertDialog.Builder(this)
+            .setTitle("Arrange presets (first $PRESET_COUNT shown while driving)")
+            .setView(scroll)
+            .setPositiveButton("Done", null)
+            .show()
     }
 
     /** Shows the saved lists, then re-downloads any slot whose saved URL is more than a day old. */
@@ -517,9 +793,12 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** Each slot's text, kept apart. Runs on the worker thread. */
-    private fun readSavedLists(): Map<Tab, String> =
-        slotFiles.mapValues { (_, file) -> readOrEmpty(file) }
+    /**
+     * Each slot's playlist, read and parsed, kept apart. Runs on the worker thread, so parsing a
+     * few hundred channels never holds up the screen.
+     */
+    private fun readSavedLists(): Map<Tab, Playlist> =
+        slotFiles.mapValues { (_, file) -> M3uParser.parsePlaylist(readOrEmpty(file)) }
 
     private fun readOrEmpty(file: File): String =
         if (file.exists()) runCatching { file.readText() }.getOrDefault("") else ""
@@ -588,8 +867,7 @@ class MainActivity : ComponentActivity() {
     }
 
     /** Parses each slot separately, so each channel knows which tab it belongs to. */
-    private fun setPlaylistText(texts: Map<Tab, String>, forceGuide: Boolean = false) {
-        val parsed = texts.mapValues { (_, text) -> M3uParser.parsePlaylist(text) }
+    private fun setPlaylistText(parsed: Map<Tab, Playlist>, forceGuide: Boolean = false) {
         channels = Tab.values().flatMap { slot ->
             parsed[slot]?.channels.orEmpty().map { it.copy(source = slot) }
         }
@@ -731,15 +1009,16 @@ class MainActivity : ComponentActivity() {
 
     /** Reads at most MAX_PLAYLIST_BYTES so a huge response cannot exhaust memory. */
     private fun readCapped(input: InputStream): String {
-        val buffer = ByteArray(MAX_PLAYLIST_BYTES + 1)
-        var total = 0
+        // Grows as needed: a typical playlist is 50-100 KB, so don't allocate 8 MB up front.
+        val out = java.io.ByteArrayOutputStream(64 * 1024)
+        val chunk = ByteArray(16 * 1024)
         while (true) {
-            val read = input.read(buffer, total, buffer.size - total)
+            val read = input.read(chunk)
             if (read < 0) break
-            total += read
-            if (total > MAX_PLAYLIST_BYTES) throw IllegalStateException("Playlist is larger than 8 MB")
+            out.write(chunk, 0, read)
+            if (out.size() > MAX_PLAYLIST_BYTES) throw IllegalStateException("Playlist is larger than 8 MB")
         }
-        return String(buffer, 0, total, Charsets.UTF_8)
+        return out.toString(Charsets.UTF_8.name())
     }
 
     /** Writes to a temp file, then renames, so a crash never leaves a half-written playlist. */
@@ -767,10 +1046,23 @@ class MainActivity : ComponentActivity() {
         val view = LayoutInflater.from(this).inflate(R.layout.dialog_settings, null)
         val urlInput = view.findViewById<EditText>(R.id.urlInput)
         val autoSwitch = view.findViewById<Switch>(R.id.autoResumeSwitch)
-        autoSwitch.isChecked = prefs.getBoolean(PREF_AUTO_RESUME, false)
+        autoSwitch.isChecked = prefs.getBoolean(PREF_AUTO_RESUME, true)
         autoSwitch.setOnCheckedChangeListener { _, checked ->
             prefs.edit().putBoolean(PREF_AUTO_RESUME, checked).apply()
         }
+        val dimSwitch = view.findViewById<Switch>(R.id.nightDimSwitch)
+        dimSwitch.isChecked = prefs.getBoolean(PREF_NIGHT_DIM, true)
+        dimSwitch.setOnCheckedChangeListener { _, checked ->
+            prefs.edit().putBoolean(PREF_NIGHT_DIM, checked).apply()
+            updateDim()
+        }
+        val artSwitch = view.findViewById<Switch>(R.id.albumArtSwitch)
+        artSwitch.isChecked = prefs.getBoolean(PlaybackService.PREF_ALBUM_ART, true)
+        artSwitch.setOnCheckedChangeListener { _, checked ->
+            prefs.edit().putBoolean(PlaybackService.PREF_ALBUM_ART, checked).apply()
+            updateStatus()
+        }
+        view.findViewById<TextView>(R.id.dataUsageText).text = DataUsage.summary(this)
         // Which playlist slot the buttons act on. Starts on the tab being viewed.
         var slot = tab
         val slotButtons = mapOf(
@@ -823,9 +1115,47 @@ class MainActivity : ComponentActivity() {
             dialog.dismiss()
             checkForUpdate(userAsked = true)
         }
+        view.findViewById<Button>(R.id.arrangePresetsButton).setOnClickListener {
+            dialog.dismiss()
+            showArrangePresets()
+        }
+        view.findViewById<Button>(R.id.netCheckButton).setOnClickListener {
+            dialog.dismiss()
+            runNetworkCheck()
+        }
         dialog.setOnDismissListener { settingsDialog = null }
         settingsDialog = dialog
         dialog.show()
+    }
+
+    // ---- Network check -----------------------------------------------------------------------
+
+    private var netCheckRunning = false
+
+    /** Tests the connection and the station on screen, then shows the report (parked only). */
+    private fun runNetworkCheck() {
+        if (netCheckRunning) return
+        netCheckRunning = true
+        message = "Checking the network..."
+        updateStatus()
+        val channel = currentChannel
+        // Its own short-lived thread, so a slow server can't hold up playlists or updates.
+        Thread {
+            val report = runCatching { NetCheck.run(applicationContext, channel) }
+                .getOrElse { "Network check failed: ${it.message}" }
+            android.util.Log.i("MG4Streams", "Network check\n$report")
+            runOnUiThread {
+                netCheckRunning = false
+                if (isDestroyed) return@runOnUiThread
+                message = null
+                updateStatus()
+                AlertDialog.Builder(this)
+                    .setTitle("Network check")
+                    .setMessage(report)
+                    .setPositiveButton("Close", null)
+                    .show()
+            }
+        }.apply { isDaemon = true; name = "netcheck" }.start()
     }
 
     // ---- App updates -------------------------------------------------------------------------
@@ -877,44 +1207,53 @@ class MainActivity : ComponentActivity() {
         AlertDialog.Builder(this)
             .setTitle("Update to ${release.tag}?")
             .setMessage("You have ${BuildConfig.VERSION_NAME}.\n\n$notes")
-            .setPositiveButton("Download and install") { _, _ -> installUpdate(release) }
+            .setPositiveButton("Download") { _, _ -> startUpdate(release) }
             .setNegativeButton("Not now", null)
             .show()
     }
 
-    /** Downloads, checks (package, version, signing key), then installs the release APK. */
-    private fun installUpdate(release: Updater.Release) {
+    /** Asks for storage permission once (so the APK lands in Downloads), then downloads. */
+    private fun startUpdate(release: Updater.Release) {
+        if (updateRunning) return
+        val permission = android.Manifest.permission.WRITE_EXTERNAL_STORAGE
+        if (checkSelfPermission(permission) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            downloadUpdate(release)
+        } else {
+            pendingRelease = release
+            storagePermission.launch(permission)
+        }
+    }
+
+    /**
+     * Downloads the release APK into Downloads, checks it (package, version, signing key), then
+     * opens Downloads so the user can tap it. Android's installer does the install: the head unit
+     * refuses installs started by the app itself.
+     */
+    private fun downloadUpdate(release: Updater.Release) {
         if (updateRunning) return
         updateRunning = true
         message = "Downloading update..."
         updateStatus()
         updateThread.execute {
             try {
-                val apk = updater.download(release) { percent ->
+                val download = updater.download(release) { percent ->
                     if (percent >= 0 && percent % 5 == 0) runOnUiThread {
                         if (!isDestroyed) { message = "Downloading update... $percent%"; updateStatus() }
                     }
                 }
-                updater.verify(apk)?.let { throw IllegalStateException(it) }
+                updater.verify(download.file)?.let { reason ->
+                    updater.discard(download)
+                    throw IllegalStateException(reason)
+                }
                 runOnUiThread {
-                    if (isDestroyed) return@runOnUiThread
-                    message = "Installing update. The app will restart."
-                    updateStatus()
-                    handler.removeCallbacks(installTimeout)
-                    handler.postDelayed(installTimeout, INSTALL_TIMEOUT_MS)
-                }
-                // Copies the APK into the install session: background thread.
-                updater.install(apk) { error ->
-                    handler.removeCallbacks(installTimeout)
                     updateRunning = false
-                    if (error != null && !isDestroyed) {
-                        message = "Update failed: $error"
-                        updateStatus()
-                    }
+                    if (isDestroyed) return@runOnUiThread
+                    showInstallSteps(download.file.name)
                 }
+            } catch (e: InterruptedException) {
+                // The screen closed; DownloadManager finishes the download on its own.
             } catch (e: Exception) {
                 runOnUiThread {
-                    handler.removeCallbacks(installTimeout)
                     updateRunning = false
                     if (!isDestroyed) { message = "Update failed: ${e.message}"; updateStatus() }
                 }
@@ -922,18 +1261,68 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** Search and settings are usable only while parked; dimmed otherwise. */
+    private fun showInstallSteps(fileName: String) {
+        message = "Update downloaded: tap $fileName in Downloads to install"
+        updateStatus()
+        AlertDialog.Builder(this)
+            .setTitle("Update downloaded")
+            .setMessage(
+                "Downloads opens next. Tap $fileName, then Install.\n\n" +
+                    "Playback stops while it installs. Open MG4 Streams again afterwards.",
+            )
+            .setPositiveButton("Open Downloads") { _, _ ->
+                if (!updater.openDownloads()) {
+                    message = "Couldn't open Downloads. Open $fileName from the Files app."
+                    updateStatus()
+                }
+            }
+            .setNegativeButton("Later", null)
+            .show()
+    }
+
+    /** Search and settings are usable only while parked. While driving they're hidden. */
     private fun updateParkedUi() {
         val allowed = videoAllowed
         searchInput.isFocusable = allowed
         searchInput.isFocusableInTouchMode = allowed
-        searchInput.alpha = if (allowed) 1f else 0.5f
-        settingsButton.alpha = if (allowed) 1f else 0.5f
         if (!allowed) {
             searchInput.clearFocus()
             hideKeyboard()
             settingsDialog?.dismiss()
         }
+        updateDrivingUi()
+    }
+
+    /**
+     * Driving layout whenever video isn't allowed (not P, or the gear is unknown): no grid,
+     * search, settings or tabs; a row of six presets; bigger text and previous/next buttons.
+     * Parked: the full layout.
+     */
+    private fun updateDrivingUi() {
+        val driving = !videoAllowed
+        val presetsVisible = driving && presets.isNotEmpty()
+        presetRow.visibility = if (presetsVisible) View.VISIBLE else View.GONE
+        presetEmpty.visibility = if (driving && presets.isEmpty()) View.VISIBLE else View.GONE
+        if (drivingUi == driving) return
+        drivingUi = driving
+        val parkedOnly = if (driving) View.GONE else View.VISIBLE
+        gridCard.visibility = parkedOnly
+        searchInput.visibility = parkedOnly
+        settingsButton.visibility = parkedOnly
+        tabViews.values.forEach { it.visibility = parkedOnly }
+        driveTitle.visibility = if (driving) View.VISIBLE else View.GONE
+        stationName.textSize = if (driving) 48f else 42f
+        stationName.maxLines = if (driving) 1 else 2
+        nowText.textSize = if (driving) 28f else 24f
+        nowText.maxLines = if (driving) 1 else 3
+        bannerText.maxLines = if (driving) 2 else 3
+        retryButton.layoutParams = retryButton.layoutParams.apply { height = if (driving) 64 else 88 }
+        val control = if (driving) DRIVING_CONTROL_PX else PARKED_CONTROL_PX
+        listOf(prevButton, nextButton).forEach { button ->
+            button.layoutParams = button.layoutParams.apply { width = control; height = control }
+        }
+        shownFrameVideo = null // re-size the logo frame for the new mode
+        updateVideoUi()
     }
 
     private fun hideKeyboard() {
@@ -957,6 +1346,7 @@ class MainActivity : ComponentActivity() {
                 MediaMetadata.Builder()
                     .setTitle(channel.name)
                     .setArtist(channel.group)
+                    .setArtworkUri(channel.logo?.let(Uri::parse))
                     .setExtras(extras)
                     .build(),
             )
@@ -976,6 +1366,7 @@ class MainActivity : ComponentActivity() {
         serviceStatus = null
         message = null
         prefs.edit().putString(PREF_LAST_URL, channel.url).apply()
+        addRecent(channel.url)
         player.repeatMode = Player.REPEAT_MODE_ALL
         player.setMediaItems(source.map { mediaItemFor(it) }, index, C.TIME_UNSET)
         player.prepare()
@@ -994,9 +1385,18 @@ class MainActivity : ComponentActivity() {
     /** On-screen previous/next. The steering wheel does the same through the session. */
     private fun stepStation(delta: Int) {
         val player = controller ?: return
-        val list = shown
-        val target = StationLists.step(list, currentChannel?.url ?: playingUrl, delta)
+        // While driving, previous/next step through the presets (the grid is hidden).
+        val list = if (drivingUi == true && presets.isNotEmpty()) presets else shown
+        val current = currentChannel?.url ?: playingUrl
+        var target = StationLists.step(list, current, delta)
         if (target < 0) return
+        // Skip stations that failed today on this connection (if any other station is left).
+        if (list[target].url in dead) {
+            val alive = DeadStations.nextAlive(list.size, target, if (delta > 0) 1 else -1) {
+                list[it].url in dead && list[it].url != current
+            }
+            if (alive >= 0) target = alive
+        }
         if (playlistMatches(player, list)) {
             player.seekTo(target, C.TIME_UNSET)
             if (player.playbackState == Player.STATE_IDLE) player.prepare()
@@ -1117,7 +1517,13 @@ class MainActivity : ComponentActivity() {
         logoView.visibility = if (panel) View.GONE else View.VISIBLE
         if (shownFrameVideo != panel) {
             shownFrameVideo = panel
-            mediaFrame.layoutParams = mediaFrame.layoutParams.apply { width = if (panel) 533 else 300 }
+            // Parked video 640 x 360 (16:9); parked logo 300; driving logo 160 (room for presets).
+            val (w, h) = when {
+                panel -> 640 to 360
+                drivingUi == true -> 160 to 160
+                else -> 300 to 300
+            }
+            mediaFrame.layoutParams = mediaFrame.layoutParams.apply { width = w; height = h }
         }
     }
 
@@ -1149,8 +1555,24 @@ class MainActivity : ComponentActivity() {
             isVideoStation() && !videoAllowed && isPlayingUi() -> "Video available in P. Audio playing."
             else -> null
         }
-        bannerText.text = banner.orEmpty()
-        bannerText.visibility = if (banner == null) View.GONE else View.VISIBLE
+        val shownBanner = banner?.let { it + hintFor(it) }
+        // Driving: the banner replaces the now-playing line, so the controls keep their room.
+        if (drivingUi == true && shownBanner != null) nowText.text = ""
+        nowText.visibility = if (nowText.text.isNullOrEmpty()) View.GONE else View.VISIBLE
+        bannerText.text = shownBanner.orEmpty()
+        bannerText.visibility = if (shownBanner == null) View.GONE else View.VISIBLE
+        retryButton.visibility = if (name != null && !stopped && isFailed()) View.VISIBLE else View.GONE
+
+        // Programme progress (TV guide), parked only.
+        if (programme != null && nowPlaying == null && drivingUi != true && programme.stop > programme.start) {
+            val elapsed = System.currentTimeMillis() - programme.start
+            guideProgress.progress = (elapsed * 1000 / (programme.stop - programme.start)).toInt().coerceIn(0, 1000)
+            guideProgress.visibility = View.VISIBLE
+        } else {
+            guideProgress.visibility = View.GONE
+        }
+        updateConnChip()
+        markPresets()
 
         playButton.setImageResource(if (isPlayingUi()) R.drawable.ic_stop else R.drawable.ic_play)
         val fav = channel != null && channel.url in favourites
@@ -1158,12 +1580,69 @@ class MainActivity : ComponentActivity() {
         starButton.setColorFilter(if (fav) getColor(R.color.warn) else getColor(R.color.text))
         starButton.alpha = if (channel == null) 0.4f else 1f
 
-        val logo = channel?.logo
+        // Cover art for the song playing (set by PlaybackService), otherwise the station logo.
+        val art = controller?.mediaMetadata?.artworkUri?.toString()
+            ?.takeIf { nowPlaying != null && it != channel?.logo && prefs.getBoolean(PlaybackService.PREF_ALBUM_ART, true) }
+        val logo = art ?: channel?.logo
         if (logo != shownLogo || logoView.drawable == null && logo != null) {
             shownLogo = logo
-            logoLoader.load(logo, logoView)
+            (if (art != null) artLoader else logoLoader).load(logo, logoView)
         }
         updateVideoUi()
+    }
+
+    /** True when playback has given up (an error is showing and nothing is retrying). */
+    private fun isFailed(): Boolean {
+        val status = serviceStatus
+        if (status != null) return status.startsWith("Can't play") || status.startsWith("No internet")
+        val player = controller ?: return false
+        return player.playerError != null && player.playbackState == Player.STATE_IDLE
+    }
+
+    private fun retry() {
+        val channel = currentChannel ?: return
+        if (controller?.currentMediaItem != null) resume() else playChannel(channel)
+    }
+
+    /**
+     * A plain-language next step for an error. A refusal (HTTP 401/403) on the car's internet is
+     * usually the broadcaster blocking that network: suggest a hotspot.
+     */
+    private fun hintFor(text: String): String {
+        val refused = text.contains("HTTP 403") || text.contains("HTTP 401")
+        if (!refused) return ""
+        val channel = currentChannel ?: return ""
+        return when {
+            netKind == NetKind.CAR -> " This channel blocks the car's internet. Use a phone hotspot or Wi-Fi for it."
+            else -> ""
+        }
+    }
+
+    /** Top-right chip: the connection, amber while reconnecting. */
+    private fun updateConnChip() {
+        val status = serviceStatus
+        val reconnecting = status != null && (status.startsWith("Reconnecting") || status.startsWith("Waiting"))
+        connChip.text = when {
+            reconnecting -> "Reconnecting…"
+            else -> netKind.label
+        }
+        connChip.setTextColor(
+            getColor(
+                when {
+                    reconnecting -> R.color.warn
+                    netKind == NetKind.NONE -> R.color.warn
+                    else -> R.color.text_dim
+                },
+            ),
+        )
+    }
+
+    /** Night dim: a dark overlay from 7 pm to 6 am (setting, on by default). */
+    private fun updateDim() {
+        val hour = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY)
+        val night = hour >= NIGHT_START_HOUR || hour < NIGHT_END_HOUR
+        val dim = night && prefs.getBoolean(PREF_NIGHT_DIM, true)
+        dimOverlay.visibility = if (dim) View.VISIBLE else View.GONE
     }
 
     // ---- Grid --------------------------------------------------------------------------------
@@ -1176,16 +1655,38 @@ class MainActivity : ComponentActivity() {
         override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
             val view = convertView
                 ?: LayoutInflater.from(parent.context).inflate(R.layout.item_station, parent, false)
+                    .also { it.tag = TileViews(it) }
+            val tile = view.tag as TileViews
             val channel = shown[position]
-            view.findViewById<TextView>(R.id.tileName).text = channel.name
-            view.findViewById<View>(R.id.tileStar).visibility =
-                if (channel.url in favourites) View.VISIBLE else View.GONE
-            view.setBackgroundResource(
-                if (channel.url == playingUrl) R.drawable.bg_tile_playing else R.drawable.bg_tile,
-            )
-            logoLoader.load(channel.logo, view.findViewById(R.id.tileLogo))
+            if (tile.compact != compactGrid) {
+                // 5 columns: smaller logo and one line of name, so tiles fit the card width.
+                tile.compact = compactGrid
+                val side = if (compactGrid) 64 else 110
+                (tile.logo.parent as View).layoutParams = (tile.logo.parent as View).layoutParams.apply { width = side; height = side }
+                tile.name.textSize = if (compactGrid) 14f else 17f
+                tile.name.setLines(if (compactGrid) 1 else 2)
+                view.setPadding(if (compactGrid) 4 else 10, 10, if (compactGrid) 4 else 10, 10)
+            }
+            tile.name.text = channel.name
+            tile.star.visibility = if (channel.url in favourites) View.VISIBLE else View.GONE
+            val playing = channel.url == playingUrl
+            if (tile.playing != playing) {
+                tile.playing = playing
+                view.setBackgroundResource(if (playing) R.drawable.bg_tile_playing else R.drawable.bg_tile)
+            }
+            view.alpha = if (channel.url in dead && !playing) DEAD_ALPHA else 1f
+            logoLoader.load(channel.logo, tile.logo)
             return view
         }
+    }
+
+    /** A grid tile's views, looked up once per tile instead of on every scroll or refresh. */
+    private class TileViews(view: View) {
+        val name: TextView = view.findViewById(R.id.tileName)
+        val star: View = view.findViewById(R.id.tileStar)
+        val logo: ImageView = view.findViewById(R.id.tileLogo)
+        var playing: Boolean? = null
+        var compact: Boolean? = null
     }
 
     private companion object {
@@ -1195,10 +1696,21 @@ class MainActivity : ComponentActivity() {
         const val PREF_URL_PREFIX = "playlistUrl_"
         const val PREF_UPDATE_CHECKED = "updateChecked"
         const val UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000L
-        const val INSTALL_TIMEOUT_MS = 3 * 60 * 1000L
         const val PREF_TAB = "tab"
         const val PREF_LAST_URL = "lastUrl"
         const val PREF_AUTO_RESUME = "autoResume"
         const val PREF_FAVS_ONLY = "favsOnly"
+        const val PREF_FILTER = "filter"
+        const val PREF_RECENTS = "recents"
+        const val PREF_COMPACT = "compactGrid"
+        const val PREF_NIGHT_DIM = "nightDim"
+        const val PRESET_COUNT = 6
+        const val DRIVING_CONTROL_PX = 110
+        const val NIGHT_START_HOUR = 19
+        const val NIGHT_END_HOUR = 6
+        const val PARKED_CONTROL_PX = 88
+        const val SWIPE_MIN_PX = 120f
+        const val DEAD_ALPHA = 0.35f
+        const val MAX_ART_FILES = 60
     }
 }

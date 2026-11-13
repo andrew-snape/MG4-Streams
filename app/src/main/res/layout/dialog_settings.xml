@@ -106,14 +106,48 @@
             android:id="@+id/autoResumeSwitch"
             android:layout_width="match_parent"
             android:layout_height="88dp"
-            android:text="Auto-resume last station on start"
+            android:text="Auto-resume last station on start (not TV)"
             android:textSize="22sp" />
+
+        <Switch
+            android:id="@+id/nightDimSwitch"
+            android:layout_width="match_parent"
+            android:layout_height="88dp"
+            android:text="Dim the screen at night (7 pm to 6 am)"
+            android:textSize="22sp" />
+
+        <Switch
+            android:id="@+id/albumArtSwitch"
+            android:layout_width="match_parent"
+            android:layout_height="88dp"
+            android:text="Album art for songs (sends the song title to Apple iTunes search)"
+            android:textSize="22sp" />
+
+        <TextView
+            android:id="@+id/dataUsageText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingTop="16dp"
+            android:paddingBottom="8dp"
+            android:textSize="20sp" />
 
         <Button
             android:id="@+id/updateButton"
             android:layout_width="match_parent"
             android:layout_height="88dp"
             android:text="Check for app updates" />
+
+        <Button
+            android:id="@+id/arrangePresetsButton"
+            android:layout_width="match_parent"
+            android:layout_height="88dp"
+            android:text="Arrange presets (order of favourites)" />
+
+        <Button
+            android:id="@+id/netCheckButton"
+            android:layout_width="match_parent"
+            android:layout_height="88dp"
+            android:text="Network check (tests the station on screen)" />
 
         <TextView
             android:id="@+id/versionText"

@@ -11,8 +11,8 @@ android {
         applicationId = "com.mg4.streams"
         minSdk = 28
         targetSdk = 28
-        versionCode = 3
-        versionName = "0.2.1"
+        versionCode = 5
+        versionName = "0.4.0"
         // GitHub "owner/repo" the in-app updater checks for releases. Change it in a fork.
         buildConfigField("String", "UPDATE_REPO", "\"andrew-snape/MG4-Streams\"")
     }
@@ -21,9 +21,19 @@ android {
         buildConfig = true
     }
 
+    lint {
+        // Head unit is Android 9 (API 28) and the app isn't on Google Play.
+        disable += "ExpiredTargetSdkVersion"
+    }
+
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // R8 drops the unused parts of Media3, Guava and Kotlin, and unused resources:
+            // about 14 MB (debug) down to a few MB, so updates download faster on the car's data.
+            // Signed afterwards with the platform key (scripts/release.sh), not here.
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
 

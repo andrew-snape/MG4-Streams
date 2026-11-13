@@ -1,4 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Two modes, switched in MainActivity by the gear gate:
+     parked (P): tabs, search, settings, station grid, video;
+     driving (anything else, or gear unknown): no grid, search or settings; a row of six presets
+     and bigger controls. -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
@@ -19,6 +23,17 @@
             android:orientation="horizontal">
 
             <TextView
+                android:id="@+id/driveTitle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:paddingStart="12dp"
+                android:text="Presets"
+                android:textColor="@color/text"
+                android:textSize="30sp"
+                android:textStyle="bold"
+                android:visibility="gone" />
+
+            <TextView
                 android:id="@+id/tabRadio"
                 style="@style/TabButton"
                 android:text="Radio" />
@@ -37,6 +52,19 @@
                 android:layout_width="0dp"
                 android:layout_height="1dp"
                 android:layout_weight="1" />
+
+            <TextView
+                android:id="@+id/connChip"
+                android:layout_width="wrap_content"
+                android:layout_height="56dp"
+                android:layout_marginEnd="16dp"
+                android:background="@drawable/bg_chip"
+                android:gravity="center"
+                android:paddingStart="22dp"
+                android:paddingEnd="22dp"
+                android:singleLine="true"
+                android:textColor="@color/text_dim"
+                android:textSize="22sp" />
 
             <EditText
                 android:id="@+id/searchInput"
@@ -72,6 +100,7 @@
 
             <!-- Now playing -->
             <LinearLayout
+                android:id="@+id/nowCard"
                 android:layout_width="0dp"
                 android:layout_height="match_parent"
                 android:layout_weight="0.62"
@@ -94,6 +123,7 @@
                             android:id="@+id/logoView"
                             android:layout_width="match_parent"
                             android:layout_height="match_parent"
+                            android:contentDescription="Station logo. Swipe to change station."
                             android:padding="20dp"
                             android:scaleType="fitCenter" />
 
@@ -143,20 +173,69 @@
                             android:textColor="@color/text_dim"
                             android:textSize="24sp" />
 
-                        <TextView
-                            android:id="@+id/bannerText"
+                        <!-- Programme progress (TV guide). -->
+                        <ProgressBar
+                            android:id="@+id/guideProgress"
+                            style="@android:style/Widget.Material.ProgressBar.Horizontal"
+                            android:layout_width="match_parent"
+                            android:layout_height="10dp"
+                            android:layout_marginTop="10dp"
+                            android:max="1000"
+                            android:progressBackgroundTint="@color/card_light"
+                            android:progressTint="@color/accent"
+                            android:visibility="gone" />
+
+                        <LinearLayout
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
                             android:layout_marginTop="12dp"
-                            android:background="@drawable/bg_banner"
-                            android:ellipsize="end"
-                            android:maxLines="3"
-                            android:padding="14dp"
-                            android:textColor="@color/warn"
-                            android:textSize="22sp"
-                            android:visibility="gone" />
+                            android:gravity="center_vertical"
+                            android:orientation="horizontal">
+
+                            <TextView
+                                android:id="@+id/bannerText"
+                                android:layout_width="0dp"
+                                android:layout_height="wrap_content"
+                                android:layout_weight="1"
+                                android:background="@drawable/bg_banner"
+                                android:ellipsize="end"
+                                android:maxLines="3"
+                                android:padding="14dp"
+                                android:textColor="@color/warn"
+                                android:textSize="22sp"
+                                android:visibility="gone" />
+
+                            <TextView
+                                android:id="@+id/retryButton"
+                                style="@style/TabButton"
+                                android:layout_width="150dp"
+                                android:layout_marginStart="12dp"
+                                android:layout_marginEnd="0dp"
+                                android:text="Retry"
+                                android:visibility="gone" />
+                        </LinearLayout>
                     </LinearLayout>
                 </LinearLayout>
+
+                <!-- Driving mode: six big presets (favourites, then recently played). -->
+                <LinearLayout
+                    android:id="@+id/presetRow"
+                    android:layout_width="match_parent"
+                    android:layout_height="170dp"
+                    android:layout_marginTop="16dp"
+                    android:orientation="horizontal"
+                    android:visibility="gone" />
+
+                <TextView
+                    android:id="@+id/presetEmpty"
+                    android:layout_width="match_parent"
+                    android:layout_height="170dp"
+                    android:layout_marginTop="16dp"
+                    android:gravity="center"
+                    android:text="No presets yet.\nWhen parked, long-press stations to add favourites."
+                    android:textColor="@color/text_dim"
+                    android:textSize="24sp"
+                    android:visibility="gone" />
 
                 <View
                     android:layout_width="match_parent"
@@ -198,8 +277,9 @@
                 </LinearLayout>
             </LinearLayout>
 
-            <!-- Station grid -->
+            <!-- Station grid (parked only) -->
             <LinearLayout
+                android:id="@+id/gridCard"
                 android:layout_width="0dp"
                 android:layout_height="match_parent"
                 android:layout_marginStart="16dp"
@@ -219,25 +299,60 @@
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
+                        android:ellipsize="end"
                         android:singleLine="true"
                         android:textColor="@color/text_dim"
-                        android:textSize="20sp"
+                        android:textSize="18sp"
                         android:textStyle="bold" />
 
                     <TextView
                         android:id="@+id/favsToggle"
                         style="@style/TabButton"
-                        android:layout_width="120dp"
+                        android:layout_width="96dp"
                         android:layout_marginEnd="8dp"
-                        android:text="Favs" />
+                        android:text="Favs"
+                        android:textSize="22sp" />
+
+                    <TextView
+                        android:id="@+id/recentToggle"
+                        style="@style/TabButton"
+                        android:layout_width="116dp"
+                        android:layout_marginEnd="8dp"
+                        android:text="Recent"
+                        android:textSize="22sp" />
 
                     <TextView
                         android:id="@+id/allToggle"
                         style="@style/TabButton"
-                        android:layout_width="100dp"
+                        android:layout_width="80dp"
+                        android:layout_marginEnd="8dp"
+                        android:text="All"
+                        android:textSize="22sp" />
+
+                    <TextView
+                        android:id="@+id/densityButton"
+                        style="@style/TabButton"
+                        android:layout_width="88dp"
                         android:layout_marginEnd="0dp"
-                        android:text="All" />
+                        android:contentDescription="Grid size"
+                        android:text="5×"
+                        android:textSize="22sp" />
                 </LinearLayout>
+
+                <HorizontalScrollView
+                    android:id="@+id/groupScroll"
+                    android:layout_width="match_parent"
+                    android:layout_height="72dp"
+                    android:scrollbars="none"
+                    android:visibility="gone">
+
+                    <LinearLayout
+                        android:id="@+id/groupChips"
+                        android:layout_width="wrap_content"
+                        android:layout_height="match_parent"
+                        android:gravity="center_vertical"
+                        android:orientation="horizontal" />
+                </HorizontalScrollView>
 
                 <FrameLayout
                     android:layout_width="match_parent"
@@ -280,4 +395,15 @@
         android:visibility="gone"
         app:resize_mode="fit"
         app:use_controller="false" />
+
+    <!-- Night dim. Not clickable, so touches pass through. -->
+    <View
+        android:id="@+id/dimOverlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="@color/dim_overlay"
+        android:clickable="false"
+        android:focusable="false"
+        android:importantForAccessibility="no"
+        android:visibility="gone" />
 </FrameLayout>

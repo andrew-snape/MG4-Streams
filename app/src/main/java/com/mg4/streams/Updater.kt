@@ -2,37 +2,39 @@ package com.mg4.streams
 
 import android.Manifest
 import android.annotation.SuppressLint
-import android.app.PendingIntent
-import android.content.BroadcastReceiver
+import android.app.DownloadManager
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.content.pm.PackageInfo
-import android.content.pm.PackageInstaller
 import android.content.pm.PackageManager
-import android.os.Handler
-import android.os.Looper
+import android.net.Uri
+import android.os.Environment
 import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
 
 /**
  * Updates the app from the latest GitHub release of [BuildConfig.UPDATE_REPO].
  *
+ * The head unit refuses installs started by a non-system app ("not a system app"), so the app
+ * doesn't install the update itself. It downloads the APK with DownloadManager into the Downloads
+ * folder, checks it, then opens Downloads. Tapping the file there hands it to Android's own
+ * installer, which the head unit allows. MG4Control updates the same way.
+ *
  * The release must have a `.apk` asset signed with the same key as the installed app, with the
- * same package name and a higher versionCode. Those are checked before installing.
- * [latest] and [download] do network I/O: call them off the UI thread.
+ * same package name and a higher versionCode. Those are checked before Downloads is opened.
+ * [latest] and [download] block on network I/O: call them off the UI thread.
  */
 class Updater(private val context: Context) {
 
-    private val main = Handler(Looper.getMainLooper())
-    /** The receiver waiting for the current install's result, if any. Main thread only. */
-    private var activeReceiver: BroadcastReceiver? = null
-
     data class Release(val tag: String, val apkUrl: String, val apkSize: Long, val notes: String)
+
+    /** A finished download: the DownloadManager id and the file. */
+    data class Download(val id: Long, val file: File)
+
+    private val downloads: DownloadManager
+        get() = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
 
     /** The latest release, or null if there is none or it has no APK. */
     fun latest(): Release? {
@@ -66,48 +68,79 @@ class Updater(private val context: Context) {
         }
     }
 
-    /** Downloads the release APK to the cache folder. [progress] gets 0-100 (or -1 if unknown). */
-    fun download(release: Release, progress: (Int) -> Unit): File {
-        val target = File(context.cacheDir, "update.apk")
-        val temp = File(context.cacheDir, "update.apk.part")
-        val connection = URL(release.apkUrl).openConnection() as HttpURLConnection
-        connection.connectTimeout = 10_000
-        connection.readTimeout = 30_000
-        connection.instanceFollowRedirects = true
-        connection.setRequestProperty("User-Agent", "MG4Streams-updater")
-        try {
-            if (connection.responseCode != 200) {
-                throw IllegalStateException("download failed (HTTP ${connection.responseCode})")
-            }
-            val total = connection.contentLengthLong.takeIf { it > 0 } ?: release.apkSize
-            var read = 0L
-            var lastPercent = -2
-            connection.inputStream.use { input ->
-                temp.outputStream().use { out ->
-                    val buffer = ByteArray(64 * 1024)
-                    while (true) {
-                        val n = input.read(buffer)
-                        if (n < 0) break
-                        out.write(buffer, 0, n)
-                        read += n
-                        if (read > MAX_APK_BYTES) throw IllegalStateException("update file is too large")
-                        val percent = if (total > 0) (read * 100 / total).toInt() else -1
-                        if (percent != lastPercent) {
-                            lastPercent = percent
-                            progress(percent)
-                        }
+    /**
+     * Downloads the release APK with DownloadManager and waits for it. Goes to the public
+     * Downloads folder when the app has storage permission, otherwise to the app's own folder
+     * (still listed in Downloads). [progress] gets 0-100, or -1 if unknown.
+     * If this thread is interrupted, the download carries on in DownloadManager.
+     */
+    fun download(release: Release, progress: (Int) -> Unit): Download {
+        val name = fileName(release.tag)
+        val public = context.checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) ==
+            PackageManager.PERMISSION_GRANTED
+        val dir = if (public) {
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+        } else {
+            context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+                ?: throw IllegalStateException("no storage for the download")
+        }
+        dir.mkdirs()
+        removeOldDownloads()
+        val request = DownloadManager.Request(Uri.parse(release.apkUrl))
+            .setTitle("$TITLE_PREFIX${release.tag}")
+            .setDescription("App update")
+            .setMimeType(APK_MIME)
+            .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+            .addRequestHeader("User-Agent", "MG4Streams-updater")
+        if (public) request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, name)
+        else request.setDestinationInExternalFilesDir(context, Environment.DIRECTORY_DOWNLOADS, name)
+        val id = downloads.enqueue(request)
+
+        val started = System.currentTimeMillis()
+        var lastPercent = -2
+        while (true) {
+            Thread.sleep(POLL_MS)
+            downloads.query(DownloadManager.Query().setFilterById(id)).use { cursor ->
+                if (!cursor.moveToFirst()) throw IllegalStateException("the download was cancelled")
+                val status = cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS))
+                when (status) {
+                    DownloadManager.STATUS_SUCCESSFUL -> {
+                        // Read the real path back: DownloadManager may have renamed the file.
+                        val path = cursor.getString(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_LOCAL_URI))
+                            ?.let { Uri.parse(it).path }
+                            ?: throw IllegalStateException("the download has no file")
+                        return Download(id, File(path))
+                    }
+                    DownloadManager.STATUS_FAILED -> {
+                        val reason = cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_REASON))
+                        downloads.remove(id)
+                        throw IllegalStateException("download failed (${describeReason(reason)})")
                     }
                 }
+                val done = cursor.getLong(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR))
+                val total = cursor.getLong(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_TOTAL_SIZE_BYTES))
+                    .takeIf { it > 0 } ?: release.apkSize
+                if (total > MAX_APK_BYTES || done > MAX_APK_BYTES) {
+                    downloads.remove(id)
+                    throw IllegalStateException("update file is too large")
+                }
+                val percent = if (total > 0) (done * 100 / total).toInt() else -1
+                if (percent != lastPercent) {
+                    lastPercent = percent
+                    progress(percent)
+                }
             }
-            if (!temp.renameTo(target)) {
-                temp.copyTo(target, overwrite = true)
-                temp.delete()
+            if (System.currentTimeMillis() - started > MAX_DOWNLOAD_MS) {
+                downloads.remove(id)
+                throw IllegalStateException("download took too long")
             }
-            return target
-        } finally {
-            connection.disconnect()
-            temp.delete()
         }
+    }
+
+    /** Deletes a download and its file (for example when it fails the checks). */
+    fun discard(download: Download) {
+        runCatching { downloads.remove(download.id) }
+        download.file.delete()
     }
 
     /** Null if [apk] is a valid update for this app, otherwise the reason it isn't. */
@@ -133,90 +166,60 @@ class Updater(private val context: Context) {
     }
 
     /**
-     * Installs [apk] with PackageInstaller. Call on a background thread: it copies the APK into
-     * the install session. A platform-signed app installs straight away; otherwise Android shows
-     * its install screen. [onResult] runs on the main thread with null on success or an error.
-     * On success the system replaces (and stops) the app.
+     * Opens the Downloads screen so the user can tap the APK and install it with Android's
+     * installer. Returns false if no Downloads screen could be opened.
      */
-    fun install(apk: File, onResult: (String?) -> Unit) {
-        val app = context.applicationContext
-        val installer = app.packageManager.packageInstaller
-        val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL)
-        params.setAppPackageName(app.packageName)
-        val sessionId = installer.createSession(params)
-        try {
-            installer.openSession(sessionId).use { session ->
-                session.openWrite("update.apk", 0, apk.length()).use { out ->
-                    apk.inputStream().use { it.copyTo(out) }
-                    session.fsync(out)
-                }
-                val receiver = object : BroadcastReceiver() {
-                    override fun onReceive(c: Context, intent: Intent) {
-                        // Only the result for this session.
-                        if (intent.getIntExtra(PackageInstaller.EXTRA_SESSION_ID, -1) != sessionId) return
-                        when (val status = intent.getIntExtra(PackageInstaller.EXTRA_STATUS, -999)) {
-                            PackageInstaller.STATUS_PENDING_USER_ACTION -> {
-                                @Suppress("DEPRECATION")
-                                val confirm = intent.getParcelableExtra<Intent>(Intent.EXTRA_INTENT)
-                                confirm?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                runCatching { app.startActivity(confirm) }
-                                    .onFailure { finish("can't open the installer: ${it.message}") }
-                            }
-                            PackageInstaller.STATUS_SUCCESS -> finish(null)
-                            else -> finish(
-                                intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE)
-                                    ?: "install failed ($status)",
-                            )
-                        }
-                    }
-
-                    private fun finish(error: String?) {
-                        cancelPending()
-                        onResult(error)
-                    }
-                }
-                val registered = CountDownLatch(1)
-                main.post {
-                    cancelPending()
-                    activeReceiver = receiver
-                    // Only senders holding INSTALL_PACKAGES (the system installer) can deliver,
-                    // so another app can't fake a result or slip in an Intent to open.
-                    app.registerReceiver(
-                        receiver,
-                        IntentFilter(ACTION_INSTALL_STATUS),
-                        Manifest.permission.INSTALL_PACKAGES,
-                        main,
-                    )
-                    registered.countDown()
-                }
-                // Register before committing, so the result can't arrive first.
-                if (!registered.await(10, TimeUnit.SECONDS)) {
-                    throw IllegalStateException("installer did not start")
-                }
-                val pending = PendingIntent.getBroadcast(
-                    app,
-                    sessionId,
-                    Intent(ACTION_INSTALL_STATUS).setPackage(app.packageName),
-                    PendingIntent.FLAG_UPDATE_CURRENT,
-                )
-                session.commit(pending.intentSender)
-            }
-        } catch (e: Exception) {
-            runCatching { installer.abandonSession(sessionId) }
-            main.post { cancelPending() }
-            throw e
-        }
+    fun openDownloads(): Boolean {
+        val intent = Intent(DownloadManager.ACTION_VIEW_DOWNLOADS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        return runCatching { context.startActivity(intent) }.isSuccess
     }
 
-    /** Stops waiting for an install result (for example after a timeout). Main thread only. */
-    fun cancelPending() {
-        activeReceiver?.let { runCatching { context.applicationContext.unregisterReceiver(it) } }
-        activeReceiver = null
+    /**
+     * Removes this app's earlier update downloads (finished or still running), record and file
+     * together, so old versions don't pile up. DownloadManager only lists this app's own
+     * downloads, so files the user put in Downloads are never touched.
+     */
+    private fun removeOldDownloads() {
+        val ids = ArrayList<Long>()
+        runCatching {
+            downloads.query(DownloadManager.Query()).use { cursor ->
+                val idCol = cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_ID)
+                val titleCol = cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_TITLE)
+                while (cursor.moveToNext()) {
+                    if (cursor.getString(titleCol)?.startsWith(TITLE_PREFIX) == true) ids += cursor.getLong(idCol)
+                }
+            }
+        }
+        if (ids.isNotEmpty()) runCatching { downloads.remove(*ids.toLongArray()) }
+    }
+
+    private fun describeReason(reason: Int): String = when (reason) {
+        DownloadManager.ERROR_INSUFFICIENT_SPACE -> "not enough space"
+        DownloadManager.ERROR_HTTP_DATA_ERROR -> "connection dropped"
+        DownloadManager.ERROR_TOO_MANY_REDIRECTS -> "too many redirects"
+        DownloadManager.ERROR_DEVICE_NOT_FOUND -> "storage not available"
+        DownloadManager.ERROR_FILE_ERROR -> "couldn't save the file"
+        DownloadManager.ERROR_CANNOT_RESUME -> "couldn't resume"
+        in 100..599 -> "HTTP $reason"
+        else -> "error $reason"
     }
 
     companion object {
-        private const val ACTION_INSTALL_STATUS = "com.mg4.streams.INSTALL_STATUS"
+        private const val APK_MIME = "application/vnd.android.package-archive"
+        private const val FILE_PREFIX = "MG4Streams-"
+        /** Title of this app's update downloads; how old ones are found again. */
+        private const val TITLE_PREFIX = "MG4 Streams "
         private const val MAX_APK_BYTES = 100L * 1024 * 1024
+        private const val POLL_MS = 500L
+        private const val MAX_DOWNLOAD_MS = 15 * 60_000L
+
+        /** "MG4Streams-0.3.0.apk" for tag "v0.3.0". Only safe file-name characters are kept. */
+        fun fileName(tag: String): String {
+            val version = tag.trim().removePrefix("v").removePrefix("V")
+                .filter { it.isLetterOrDigit() || it == '.' || it == '-' || it == '_' }
+                .ifEmpty { "update" }
+            return "$FILE_PREFIX$version.apk"
+        }
 
         /** True if release [tag] (e.g. "v0.3.0") is a higher version than [current] ("0.2.0"). */
         fun isNewer(tag: String, current: String): Boolean {

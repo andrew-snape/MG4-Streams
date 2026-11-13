@@ -35,6 +35,9 @@ class LogoLoader(
     private val inFlight = HashMap<String, MutableList<ImageView>>()
 
     fun load(url: String?, view: ImageView) {
+        // Already showing this logo (the grid refreshes on every station change): leave it, so
+        // tiles don't blink.
+        if (url != null && view.tag == url && view.drawable != null) return
         view.tag = url
         view.setImageDrawable(null)
         if (url == null) return
