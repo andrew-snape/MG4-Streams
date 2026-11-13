@@ -171,6 +171,25 @@ class MainActivity : ComponentActivity() {
         uri?.let { importFromUri(it, importSlot) }
     }
 
+    private val openUrlList = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let { importUrlList(it, importSlot) }
+    }
+
+    private val updater by lazy { Updater(this) }
+    private var updateRunning = false
+    /** Update check, download and install, so they never hold up playlist work on [worker]. */
+    private val updateThread = Executors.newSingleThreadExecutor()
+
+    /** Gives up waiting for an install result (e.g. the install screen was backed out of). */
+    private val installTimeout = Runnable {
+        if (updateRunning) {
+            updater.cancelPending()
+            updateRunning = false
+            message = "Update didn't finish. Try again from Settings."
+            updateStatus()
+        }
+    }
+
     private val controllerListener = object : Player.Listener {
         override fun onMediaMetadataChanged(mediaMetadata: MediaMetadata) {
             // Stream titles (ICY) replace the station name in the player's metadata.
@@ -353,6 +372,8 @@ class MainActivity : ComponentActivity() {
         worker.shutdown()
         gearThread.shutdownNow()
         guideThread.shutdownNow()
+        updateThread.shutdownNow()
+        handler.removeCallbacks(installTimeout)
         logoThreads.shutdownNow()
         super.onDestroy()
     }
@@ -482,10 +503,11 @@ class MainActivity : ComponentActivity() {
     private fun loadPlaylists() {
         showSavedLists()
         val stale = Tab.values().filter { slot ->
-            savedUrl(slot) != null &&
+            savedUrls(slot).isNotEmpty() &&
                 System.currentTimeMillis() - slotFiles.getValue(slot).lastModified() > PLAYLIST_MAX_AGE_MS
         }
         if (stale.isNotEmpty()) refreshSlots(stale, quiet = true)
+        checkForUpdateDaily()
     }
 
     private fun showSavedLists() {
@@ -502,15 +524,31 @@ class MainActivity : ComponentActivity() {
     private fun readOrEmpty(file: File): String =
         if (file.exists()) runCatching { file.readText() }.getOrDefault("") else ""
 
-    private fun savedUrl(slot: Tab): String? =
-        prefs.getString(PREF_URL_PREFIX + slot.name, null)?.takeIf { it.isNotBlank() }
+    /** The playlist addresses saved for [slot] (one per line in preferences). */
+    private fun savedUrls(slot: Tab): List<String> =
+        prefs.getString(PREF_URL_PREFIX + slot.name, null).orEmpty()
+            .lines().map { it.trim() }.filter { it.isNotEmpty() }
+
+    private fun saveUrls(slot: Tab, urls: List<String>) {
+        val editor = prefs.edit()
+        if (urls.isEmpty()) editor.remove(PREF_URL_PREFIX + slot.name)
+        else editor.putString(PREF_URL_PREFIX + slot.name, urls.joinToString("\n"))
+        editor.apply()
+    }
+
+    /** Downloads every address and joins them into one playlist. Throws if any fails. */
+    private fun fetchAll(urls: List<String>): String {
+        val text = urls.joinToString("\n") { fetchText(it) }
+        if (text.length > MAX_PLAYLIST_BYTES) throw IllegalStateException("playlists are larger than 8 MB together")
+        return text
+    }
 
     /**
      * Re-downloads each slot in [slots] from its saved URL. A slot that fails keeps its saved
      * list. [quiet] skips the progress message (used for the automatic refresh on start).
      */
     private fun refreshSlots(slots: List<Tab>, quiet: Boolean = false) {
-        val jobs = slots.mapNotNull { slot -> savedUrl(slot)?.let { slot to it } }
+        val jobs = slots.map { slot -> slot to savedUrls(slot) }.filter { it.second.isNotEmpty() }
         if (jobs.isEmpty()) {
             message = "No saved playlist addresses. Add one with Add URL."
             updateStatus()
@@ -522,9 +560,10 @@ class MainActivity : ComponentActivity() {
         }
         worker.execute {
             val failed = mutableListOf<String>()
-            for ((slot, url) in jobs) {
+            for ((slot, urls) in jobs) {
                 try {
-                    saveAtomically(slotFiles.getValue(slot), fetchText(url))
+                    // All of a slot's addresses, or none: a failure keeps the saved list.
+                    saveAtomically(slotFiles.getValue(slot), fetchAll(urls))
                 } catch (e: Exception) {
                     failed += "${slot.label}: ${e.message}"
                 }
@@ -612,11 +651,49 @@ class MainActivity : ComponentActivity() {
                     ?: throw IllegalStateException("Could not open file")
                 val text = stream.use { readCapped(it) }
                 saveAtomically(slotFiles.getValue(slot), text)
-                prefs.edit().remove(PREF_URL_PREFIX + slot.name).apply()
+                saveUrls(slot, emptyList())
                 val texts = readSavedLists()
                 runOnUiThread { if (!isDestroyed) setPlaylistText(texts, forceGuide = true) }
             } catch (e: Exception) {
                 runOnUiThread { if (!isDestroyed) { message = "Import failed: ${e.message}"; updateStatus() } }
+            }
+        }
+    }
+
+    /**
+     * Reads a text file of playlist addresses (see [UrlListParser]), saves them for each tab the
+     * file names, and downloads them. Tabs the file doesn't mention are left alone. Bare addresses
+     * go to [defaultSlot]. A tab whose download fails keeps its old list but saves the addresses.
+     */
+    private fun importUrlList(uri: Uri, defaultSlot: Tab) {
+        message = "Reading address list..."
+        updateStatus()
+        worker.execute {
+            try {
+                val stream = contentResolver.openInputStream(uri)
+                    ?: throw IllegalStateException("Could not open file")
+                val lists = UrlListParser.parse(stream.use { readCapped(it) }, defaultSlot)
+                if (lists.isEmpty()) throw IllegalStateException("no http(s) addresses found")
+                val failed = mutableListOf<String>()
+                for ((slot, urls) in lists) {
+                    saveUrls(slot, urls)
+                    try {
+                        saveAtomically(slotFiles.getValue(slot), fetchAll(urls))
+                    } catch (e: Exception) {
+                        failed += "${slot.label}: ${e.message}"
+                    }
+                }
+                val summary = lists.entries.joinToString(", ") { (slot, urls) -> "${slot.label} ${urls.size}" }
+                val texts = readSavedLists()
+                runOnUiThread {
+                    if (isDestroyed) return@runOnUiThread
+                    setPlaylistText(texts, forceGuide = true)
+                    message = if (failed.isEmpty()) "Imported addresses ($summary)"
+                    else "Imported addresses ($summary). Download failed: ${failed.joinToString("; ")}"
+                    updateStatus()
+                }
+            } catch (e: Exception) {
+                runOnUiThread { if (!isDestroyed) { message = "Address list failed: ${e.message}"; updateStatus() } }
             }
         }
     }
@@ -633,7 +710,7 @@ class MainActivity : ComponentActivity() {
         worker.execute {
             try {
                 saveAtomically(slotFiles.getValue(slot), fetchText(address))
-                prefs.edit().putString(PREF_URL_PREFIX + slot.name, address).apply()
+                saveUrls(slot, listOf(address))
                 val texts = readSavedLists()
                 runOnUiThread { if (!isDestroyed) setPlaylistText(texts, forceGuide = true) }
             } catch (e: Exception) {
@@ -646,7 +723,7 @@ class MainActivity : ComponentActivity() {
     private fun clearSlot(slot: Tab) {
         worker.execute {
             slotFiles.getValue(slot).delete()
-            prefs.edit().remove(PREF_URL_PREFIX + slot.name).apply()
+            saveUrls(slot, emptyList())
             val texts = readSavedLists()
             runOnUiThread { if (!isDestroyed) setPlaylistText(texts) }
         }
@@ -704,7 +781,10 @@ class MainActivity : ComponentActivity() {
         fun selectSlot(newSlot: Tab) {
             slot = newSlot
             slotButtons.forEach { (s, b) -> b.isSelected = s == newSlot }
-            urlInput.setText(savedUrl(newSlot).orEmpty())
+            val urls = savedUrls(newSlot)
+            urlInput.setText(if (urls.size == 1) urls[0] else "")
+            urlInput.hint = if (urls.size > 1) "${urls.size} saved addresses (from an address list)"
+            else "Playlist URL (.m3u / .m3u8)"
         }
         slotButtons.forEach { (s, b) -> b.setOnClickListener { selectSlot(s) } }
         selectSlot(slot)
@@ -732,9 +812,114 @@ class MainActivity : ComponentActivity() {
             dialog.dismiss()
             refreshSlots(Tab.values().toList())
         }
+        view.findViewById<Button>(R.id.importUrlsButton).setOnClickListener {
+            importSlot = slot
+            dialog.dismiss()
+            openUrlList.launch(arrayOf("text/*", "application/octet-stream"))
+        }
+        view.findViewById<TextView>(R.id.versionText).text =
+            "Version ${BuildConfig.VERSION_NAME} · updates from github.com/${BuildConfig.UPDATE_REPO}"
+        view.findViewById<Button>(R.id.updateButton).setOnClickListener {
+            dialog.dismiss()
+            checkForUpdate(userAsked = true)
+        }
         dialog.setOnDismissListener { settingsDialog = null }
         settingsDialog = dialog
         dialog.show()
+    }
+
+    // ---- App updates -------------------------------------------------------------------------
+
+    /** Checks GitHub at most once a day, quietly; only says something if there is an update. */
+    private fun checkForUpdateDaily() {
+        val last = prefs.getLong(PREF_UPDATE_CHECKED, 0L)
+        if (System.currentTimeMillis() - last < UPDATE_CHECK_INTERVAL_MS) return
+        checkForUpdate(userAsked = false)
+    }
+
+    private fun checkForUpdate(userAsked: Boolean) {
+        if (updateRunning) {
+            if (userAsked) {
+                message = "An update is already in progress"
+                updateStatus()
+            }
+            return
+        }
+        updateRunning = true
+        if (userAsked) {
+            message = "Checking for updates..."
+            updateStatus()
+        }
+        updateThread.execute {
+            val result = runCatching { updater.latest() }
+            runOnUiThread {
+                updateRunning = false
+                if (isDestroyed) return@runOnUiThread
+                result.onSuccess { release ->
+                    prefs.edit().putLong(PREF_UPDATE_CHECKED, System.currentTimeMillis()).apply()
+                    when {
+                        release != null && Updater.isNewer(release.tag, BuildConfig.VERSION_NAME) ->
+                            if (userAsked) offerUpdate(release)
+                            else message = "Update ${release.tag} available. Open Settings to install."
+                        userAsked -> message = "Up to date (version ${BuildConfig.VERSION_NAME})"
+                    }
+                }.onFailure {
+                    if (userAsked) message = "Update check failed: ${it.message}"
+                }
+                updateStatus()
+            }
+        }
+    }
+
+    private fun offerUpdate(release: Updater.Release) {
+        message = null
+        val notes = release.notes.take(600).ifEmpty { "No release notes." }
+        AlertDialog.Builder(this)
+            .setTitle("Update to ${release.tag}?")
+            .setMessage("You have ${BuildConfig.VERSION_NAME}.\n\n$notes")
+            .setPositiveButton("Download and install") { _, _ -> installUpdate(release) }
+            .setNegativeButton("Not now", null)
+            .show()
+    }
+
+    /** Downloads, checks (package, version, signing key), then installs the release APK. */
+    private fun installUpdate(release: Updater.Release) {
+        if (updateRunning) return
+        updateRunning = true
+        message = "Downloading update..."
+        updateStatus()
+        updateThread.execute {
+            try {
+                val apk = updater.download(release) { percent ->
+                    if (percent >= 0 && percent % 5 == 0) runOnUiThread {
+                        if (!isDestroyed) { message = "Downloading update... $percent%"; updateStatus() }
+                    }
+                }
+                updater.verify(apk)?.let { throw IllegalStateException(it) }
+                runOnUiThread {
+                    if (isDestroyed) return@runOnUiThread
+                    message = "Installing update. The app will restart."
+                    updateStatus()
+                    handler.removeCallbacks(installTimeout)
+                    handler.postDelayed(installTimeout, INSTALL_TIMEOUT_MS)
+                }
+                // Copies the APK into the install session: background thread.
+                updater.install(apk) { error ->
+                    handler.removeCallbacks(installTimeout)
+                    updateRunning = false
+                    if (error != null && !isDestroyed) {
+                        message = "Update failed: $error"
+                        updateStatus()
+                    }
+                }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    handler.removeCallbacks(installTimeout)
+                    updateRunning = false
+                    if (!isDestroyed) { message = "Update failed: ${e.message}"; updateStatus() }
+                }
+            }
+        }
     }
 
     /** Search and settings are usable only while parked; dimmed otherwise. */
@@ -1008,6 +1193,9 @@ class MainActivity : ComponentActivity() {
         const val MAX_PLAYLIST_BYTES = 8 * 1024 * 1024
         const val PLAYLIST_MAX_AGE_MS = 24 * 60 * 60 * 1000L
         const val PREF_URL_PREFIX = "playlistUrl_"
+        const val PREF_UPDATE_CHECKED = "updateChecked"
+        const val UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000L
+        const val INSTALL_TIMEOUT_MS = 3 * 60 * 1000L
         const val PREF_TAB = "tab"
         const val PREF_LAST_URL = "lastUrl"
         const val PREF_AUTO_RESUME = "autoResume"

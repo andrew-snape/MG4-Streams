@@ -11,8 +11,14 @@ android {
         applicationId = "com.mg4.streams"
         minSdk = 28
         targetSdk = 28
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.2.0"
+        // GitHub "owner/repo" the in-app updater checks for releases. Change it in a fork.
+        buildConfigField("String", "UPDATE_REPO", "\"andrew-snape/MG4-Streams\"")
+    }
+
+    buildFeatures {
+        buildConfig = true
     }
 
     buildTypes {

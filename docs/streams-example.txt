@@ -1,0 +1,13 @@
+# MG4 Streams address list
+# Copy this to a USB stick, edit it, then in the app: Settings > Import address list (.txt).
+# Lines starting with # are comments. Only http:// and https:// addresses are used.
+
+# Name the tab at the start of a line...
+radio = https://example.com/radio.m3u8
+tv = https://example.com/tv.m3u8
+
+# ...or use a [tab] header for the addresses below it.
+# A tab can have several playlists; they are joined together.
+[my list]
+https://example.com/my-playlist-1.m3u
+https://example.com/my-playlist-2.m3u
