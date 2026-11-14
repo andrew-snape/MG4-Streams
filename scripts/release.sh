@@ -7,6 +7,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 VERSION="${1:?usage: scripts/release.sh <version> [--no-publish]}"
+VERSION="${VERSION#v}"; VERSION="${VERSION%.}"   # accept v0.5.0 and a stray trailing dot
 PUBLISH=1; [[ "${2:-}" == "--no-publish" ]] && PUBLISH=0
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Version must look like 0.5.0"; exit 1; }
 
