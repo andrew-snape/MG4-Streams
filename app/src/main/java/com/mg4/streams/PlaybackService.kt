@@ -85,9 +85,11 @@ class PlaybackService : MediaSessionService() {
     private var autoSkips = 0
 
     // ---- USB files: resume points ----
-    /** The USB file playing and its length, from the last save. */
+    /** The USB file playing, its resume key (null until read off the main thread), and length. */
     private var usbFile: File? = null
+    private var usbKey: String? = null
     private var usbDurationMs = 0L
+    private val usbExecutor = Executors.newSingleThreadExecutor()
     private val positionRunnable = object : Runnable {
         override fun run() {
             saveUsbPosition()
@@ -105,7 +107,7 @@ class PlaybackService : MediaSessionService() {
 
         override fun onPlaybackStateChanged(state: Int) {
             when (state) {
-                Player.STATE_ENDED -> usbFile?.let { UsbPositions.markWatched(this@PlaybackService, it, usbDurationMs) }
+                Player.STATE_ENDED -> usbKey?.let { UsbPositions.markWatched(this@PlaybackService, it, usbDurationMs) }
                 Player.STATE_READY -> {
                     saveUsbPosition()
                     resetRetries(clearStatus = true)
@@ -129,12 +131,12 @@ class PlaybackService : MediaSessionService() {
 
         override fun onPositionDiscontinuity(old: Player.PositionInfo, new: Player.PositionInfo, reason: Int) {
             // Leaving a USB file: finished (played to the end) or stopped part-way (next/previous).
-            val file = usbFile ?: return
-            if (old.mediaItemIndex == new.mediaItemIndex) return
+            val key = usbKey ?: return
+            if (old.mediaItem?.mediaId == new.mediaItem?.mediaId) return
             if (reason == Player.DISCONTINUITY_REASON_AUTO_TRANSITION) {
-                UsbPositions.markWatched(this@PlaybackService, file, usbDurationMs)
+                UsbPositions.markWatched(this@PlaybackService, key, usbDurationMs)
             } else if (usbDurationMs > 0) {
-                UsbPositions.save(this@PlaybackService, file, old.positionMs, usbDurationMs)
+                UsbPositions.save(this@PlaybackService, key, old.positionMs, usbDurationMs)
             }
         }
 
@@ -239,6 +241,7 @@ class PlaybackService : MediaSessionService() {
         saveUsbPosition()
         handler.removeCallbacksAndMessages(null)
         artExecutor.shutdownNow()
+        usbExecutor.shutdown()
         runCatching { DataUsage.sample(this) }
         runCatching { connectivity.unregisterNetworkCallback(networkCallback) }
         session?.let { mediaSession ->
@@ -254,14 +257,21 @@ class PlaybackService : MediaSessionService() {
         val reason = describe(error)
         handler.removeCallbacks(retryRunnable)
         networkRetryQueued = false
+        if (fileOf(player.currentMediaItem) != null) {
+            // A file on the USB stick: retrying or waiting for internet won't help. Move on to the
+            // next episode if there is one (the playlist doesn't loop, so this ends).
+            setStatus("Can't play this file: $reason")
+            if (player.playWhenReady && player.hasNextMediaItem()) {
+                handler.post {
+                    player.seekToNextMediaItem()
+                    player.prepare()
+                }
+            }
+            return
+        }
         if (!player.playWhenReady || !isRetryable(error)) {
             setStatus("Can't play: $reason")
             gaveUp(error)
-            return
-        }
-        if (fileOf(player.currentMediaItem) != null) {
-            // A file on the USB stick: retrying or waiting for internet won't help.
-            setStatus("Can't play this file: $reason")
             return
         }
         if (!isNetworkUp()) {
@@ -309,23 +319,35 @@ class PlaybackService : MediaSessionService() {
         handler.removeCallbacks(positionRunnable)
         val file = fileOf(item)
         usbFile = file
+        usbKey = null
         usbDurationMs = 0L
         if (file == null) return
-        val start = UsbPositions.startPosition(this, file)
-        if (start > 0) {
-            val index = player.currentMediaItemIndex
-            handler.post { if (player.currentMediaItemIndex == index) player.seekTo(index, start) }
+        val mediaId = item?.mediaId
+        // The key needs the file size: read it off the main thread (a slow stick mustn't stall it).
+        runCatching {
+            usbExecutor.execute {
+                val key = runCatching { UsbPositions.key(file) }.getOrNull() ?: return@execute
+                val start = UsbPositions.startPosition(this, key)
+                UsbPositions.prune(this)
+                handler.post {
+                    if (player.currentMediaItem?.mediaId != mediaId) return@post
+                    usbKey = key
+                    // Resume, unless the user has already moved on in this episode.
+                    if (start > 0 && player.currentPosition < 15_000) player.seekTo(player.currentMediaItemIndex, start)
+                }
+            }
         }
         handler.postDelayed(positionRunnable, POSITION_SAVE_MS)
     }
 
     private fun saveUsbPosition() {
         val file = usbFile ?: return
+        val key = usbKey ?: return
         if (fileOf(player.currentMediaItem)?.path != file.path) return
         val duration = player.duration
         if (duration == C.TIME_UNSET || duration <= 0) return
         usbDurationMs = duration
-        UsbPositions.save(this, file, player.currentPosition, duration)
+        UsbPositions.save(this, key, player.currentPosition, duration)
     }
 
     private fun currentUrl(): String? = player.currentMediaItem?.let { item ->

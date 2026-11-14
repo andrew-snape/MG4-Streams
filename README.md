@@ -100,7 +100,7 @@ Install over ADB. `adb install` is refused, so push the APK and install it with 
 
 ```sh
 adb push MG4Streams-platform.apk /data/local/tmp/
-adb shell pm install -r -f -d -t /data/local/tmp/MG4Streams-platform.apk
+adb shell pm install -r -f -d -t -g /data/local/tmp/MG4Streams-platform.apk   # -g grants storage access for USB
 ```
 
 Updates must be signed with the same key. After the first install, use the in-app updater (below).

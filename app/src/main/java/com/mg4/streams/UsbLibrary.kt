@@ -46,19 +46,24 @@ object UsbLibrary {
     fun isVideo(file: File) = file.extension.lowercase() in VIDEO
 
     /**
-     * Mounted removable volumes (USB sticks, SD cards), not the internal storage. Uses the app's
-     * external dirs (one per mounted volume) plus /storage, for sticks the app dirs miss.
+     * Mounted removable volumes (USB sticks, SD cards), not the internal storage. Read from the
+     * StorageManager, plus a scan of /storage. Doesn't use getExternalFilesDirs: on Android 9 that
+     * creates Android/data/<app> folders on every stick, and nothing may be written to the stick.
      */
     fun roots(context: Context): List<File> {
         val internal = runCatching { Environment.getExternalStorageDirectory().canonicalPath }.getOrNull()
-        val fromApp = context.getExternalFilesDirs(null).filterNotNull().mapNotNull { dir ->
-            val path = dir.absolutePath
-            val cut = path.indexOf("/Android/data/")
-            if (cut > 0) File(path.substring(0, cut)) else null
-        }
+        val manager = context.getSystemService(Context.STORAGE_SERVICE) as? android.os.storage.StorageManager
+        val fromManager = runCatching {
+            manager?.storageVolumes.orEmpty()
+                .filter { it.isRemovable && it.state == Environment.MEDIA_MOUNTED }
+                .mapNotNull { volume ->
+                    // StorageVolume.getPath() is hidden on Android 9; platform-signed apps may call it.
+                    runCatching { volume.javaClass.getMethod("getPath").invoke(volume) as? String }.getOrNull()?.let(::File)
+                }
+        }.getOrDefault(emptyList())
         val fromStorage = File("/storage").listFiles().orEmpty()
             .filter { it.name != "emulated" && it.name != "self" && it.isDirectory }
-        return (fromApp + fromStorage)
+        return (fromManager + fromStorage)
             .filter { runCatching { it.canonicalPath != internal && it.canRead() && it.list() != null }.getOrDefault(false) }
             .distinctBy { runCatching { it.canonicalPath }.getOrDefault(it.path) }
     }
@@ -69,20 +74,27 @@ object UsbLibrary {
         val folders = all.filter { it.isDirectory && it.name.lowercase() !in HIDDEN }
             .sortedWith(compareBy(NATURAL) { it.name })
             .map { UsbEntry(it, true, it.name, posterFor(it)?.let { p -> "file://${p.path}" } ?: framePlaceholder(it)) }
+        val names = all.mapTo(HashSet()) { it.name }
         val files = all.filter { it.isFile && isMedia(it) }
             .sortedWith(compareBy(NATURAL) { it.name })
-            .map { fileEntry(it) }
+            .map { fileEntry(it, names) }
         return folders + files
     }
 
-    fun fileEntry(file: File): UsbEntry {
+    /**
+     * [names]: the file names in [file]'s folder, if already listed, so checking for .nfo and
+     * thumbnail files costs no extra disk access (slow on a USB stick).
+     */
+    fun fileEntry(file: File, names: Set<String>? = null): UsbEntry {
+        val folder = file.parentFile
+        fun exists(name: String) = if (names != null) name in names else File(folder, name).isFile
         val info = episodeInfo(file)
-        val nfo = readNfoTitle(File(file.parentFile, file.nameWithoutExtension + ".nfo"))
+        val base = file.nameWithoutExtension
+        val nfo = if (exists("$base.nfo")) readNfoTitle(File(folder, "$base.nfo")) else null
         val title = nfo ?: info.title
-        val label = listOfNotNull(info.code, title).joinToString(" · ").ifEmpty { cleanName(file.nameWithoutExtension) }
-        val thumb = IMAGE_EXT.asSequence().flatMap { ext ->
-            sequenceOf(File(file.parentFile, "${file.nameWithoutExtension}-thumb.$ext"), File(file.parentFile, "${file.nameWithoutExtension}.$ext"))
-        }.firstOrNull { it.isFile }
+        val label = listOfNotNull(info.code, title).joinToString(" · ").ifEmpty { cleanName(base) }
+        val thumb = IMAGE_EXT.asSequence().flatMap { ext -> sequenceOf("$base-thumb.$ext", "$base.$ext") }
+            .firstOrNull { exists(it) }?.let { File(folder, it) }
         val image = thumb?.let { "file://${it.path}" } ?: if (isVideo(file)) "frame://${file.path}" else null
         return UsbEntry(file, false, label, image, info.copy(title = title))
     }
@@ -122,6 +134,30 @@ object UsbLibrary {
         return seasons.flatMap { media(it) }.ifEmpty { listOf(file) }
     }
 
+    /** One playlist item: the entry and its subtitle file, if any. */
+    data class Item(val entry: UsbEntry, val subtitle: File?)
+
+    /** [playlistFor] with entries and subtitles, listing each folder once. */
+    fun playlistItems(file: File): List<Item> {
+        val files = playlistFor(file)
+        val listings = files.mapNotNull { it.parentFile }.distinct()
+            .associateWith { dir -> dir.list()?.toHashSet() ?: hashSetOf() }
+        return files.map { f ->
+            val names = listings[f.parentFile].orEmpty()
+            Item(fileEntry(f, names), subtitleIn(f, names))
+        }
+    }
+
+    /** The subtitle file for [video] among [names] (its folder): "Name.srt", then "Name.en.srt"... */
+    fun subtitleIn(video: File, names: Set<String>): File? {
+        val base = video.nameWithoutExtension
+        val match = names.filter { n ->
+            val ext = n.substringAfterLast('.', "").lowercase()
+            ext in SUBTITLES && (n.substringBeforeLast('.') == base || n.startsWith("$base."))
+        }.minByOrNull { it.length } ?: return null
+        return File(video.parentFile, match)
+    }
+
     /** Subtitle files next to [video]: "Name.srt", "Name.en.srt"... */
     fun subtitlesFor(video: File): List<File> {
         val base = video.nameWithoutExtension
@@ -139,17 +175,18 @@ object UsbLibrary {
 
     fun nfoTitle(xml: String): String? =
         Regex("<title>\\s*(.*?)\\s*</title>", RegexOption.DOT_MATCHES_ALL).find(xml)?.groupValues?.get(1)
+            ?.replace(Regex("^<!\\[CDATA\\[(.*)]]>$", RegexOption.DOT_MATCHES_ALL), "$1")?.trim()
             ?.replace("&amp;", "&")?.replace("&apos;", "'")?.replace("&quot;", "\"")?.replace("&lt;", "<")?.replace("&gt;", ">")
             ?.takeIf { it.isNotBlank() }
 
     // ---- Pure parsing ----
 
-    private val SXE = Regex("(?i)\\bS(\\d{1,2})[ ._-]?E(\\d{1,3})(?:[ ._-]?E\\d{1,3})*")
-    private val NXN = Regex("(?i)\\b(\\d{1,2})x(\\d{2,3})\\b")
-    private val EP_ONLY = Regex("(?i)\\b(?:E|Ep|Episode)[ ._-]?(\\d{1,3})\\b")
-    private val SEASON = Regex("(?i)^(?:season|series|staffel|saison)[ ._-]*(\\d{1,2})$|^S(\\d{1,2})$")
+    private val SXE = Regex("(?i)(?<![A-Za-z0-9])S(\\d{1,2})[ ._-]?E(\\d{1,3})(?:[ ._-]?E\\d{1,3})*")
+    private val NXN = Regex("(?i)(?<![A-Za-z0-9])(\\d{1,2})x(\\d{2,3})(?![A-Za-z0-9])")
+    private val EP_ONLY = Regex("(?i)(?<![A-Za-z0-9])(?:E|Ep|Episode)[ ._-]?(\\d{1,3})(?![0-9])")
+    private val SEASON = Regex("(?i)^(?:season|series|staffel|saison)[ ._-]*(\\d{1,2})(?:\\b.*)?$|^S(\\d{1,2})$")
     private val JUNK = Regex(
-        "(?i)[ ._-]*[\\[(]?\\b(2160p|1080p|1080i|720p|576p|480p|4k|uhd|hdr|web[ ._-]?dl|webrip|web|bluray|blu[ ._-]?ray|brrip|bdrip|hdtv|dvdrip|x264|x265|h[ ._]?264|h[ ._]?265|hevc|aac|ac3|eac3|ddp?5[ ._]?1|dts|10bit|repack|amzn|dsnp)\\b.*$",
+        "(?i)[ ._-]*[\\[(]?\\b(2160p|1080p|1080i|720p|576p|480p|web[ ._-]?dl|webrip|bluray|blu[ ._-]?ray|brrip|bdrip|hdtv|dvdrip|x264|x265|h[ ._]?264|h[ ._]?265|hevc|aac|ac3|eac3|ddp?5[ ._]?1|10bit|repack|amzn|dsnp)\\b.*$",
     )
 
     /** "Season 2", "Series 2", "S02" -> 2. */

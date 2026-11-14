@@ -25,7 +25,10 @@ object UsbPositions {
         val progress: Int get() = if (durationMs > 0) (positionMs * 1000 / durationMs).toInt().coerceIn(0, 1000) else 0
     }
 
-    /** "/storage/1234-ABCD/TV/Show/S01E02.mkv" -> "TV/Show/S01E02.mkv|<size>". */
+    /**
+     * "/storage/1234-ABCD/TV/Show/S01E02.mkv" -> "TV/Show/S01E02.mkv|<size>". Reads the file size
+     * from the stick: call off the main thread, and keep the key rather than asking again.
+     */
     fun key(file: File): String = "${relative(file.path)}|${file.length()}"
 
     fun relative(path: String): String {
@@ -39,26 +42,32 @@ object UsbPositions {
         return parts.drop(skip).joinToString("/")
     }
 
-    fun get(context: Context, file: File): Entry? = parse(prefs(context).getString(key(file), null))
+    fun get(context: Context, key: String): Entry? = parse(prefs(context).getString(key, null))
 
-    fun save(context: Context, file: File, positionMs: Long, durationMs: Long) {
+    /** In-memory prefs write (saved to disk in the background): fine on the main thread. */
+    fun save(context: Context, key: String, positionMs: Long, durationMs: Long) {
         if (durationMs <= 0 || positionMs < 0) return
+        prefs(context).edit().putString(key, "$positionMs|$durationMs|${System.currentTimeMillis()}").apply()
+    }
+
+    fun markWatched(context: Context, key: String, durationMs: Long) {
+        if (durationMs > 0) save(context, key, durationMs, durationMs)
+    }
+
+    /** Keeps the newest [MAX_ENTRIES]. Call now and then (each new USB file), not on every save. */
+    fun prune(context: Context) {
         val prefs = prefs(context)
-        val editor = prefs.edit().putString(key(file), "$positionMs|$durationMs|${System.currentTimeMillis()}")
-        if (prefs.all.size > MAX_ENTRIES) {
-            prefs.all.entries.sortedBy { parse(it.value as? String)?.updated ?: 0L }
-                .take(prefs.all.size - MAX_ENTRIES).forEach { editor.remove(it.key) }
-        }
+        val all = prefs.all
+        if (all.size <= MAX_ENTRIES) return
+        val editor = prefs.edit()
+        all.entries.sortedBy { parse(it.value as? String)?.updated ?: 0L }
+            .take(all.size - MAX_ENTRIES).forEach { editor.remove(it.key) }
         editor.apply()
     }
 
-    fun markWatched(context: Context, file: File, durationMs: Long) {
-        if (durationMs > 0) save(context, file, durationMs, durationMs)
-    }
-
-    /** Where to start [file]: the saved point if it's partly watched, else 0. */
-    fun startPosition(context: Context, file: File): Long {
-        val entry = get(context, file) ?: return 0L
+    /** Where to start: the saved point if it's partly watched, else 0. */
+    fun startPosition(context: Context, key: String): Long {
+        val entry = get(context, key) ?: return 0L
         return if (!entry.watched && entry.positionMs >= MIN_RESUME_MS) entry.positionMs - 5_000 else 0L
     }
 

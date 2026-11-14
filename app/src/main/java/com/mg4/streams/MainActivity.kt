@@ -166,6 +166,8 @@ class MainActivity : ComponentActivity() {
     private val usbAdapter = UsbAdapter()
     /** Posters and video stills: one thread, so frame grabs don't compete with playback. */
     private val usbThumbThread = Executors.newSingleThreadExecutor()
+    /** USB listing and playlist building: off the shared worker, so playlist saves don't wait. */
+    private val usbThread = Executors.newSingleThreadExecutor()
     private lateinit var usbLoader: LogoLoader
     private val mountReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -251,6 +253,14 @@ class MainActivity : ComponentActivity() {
     /** The release waiting for the storage permission answer. */
     private var pendingRelease: Updater.Release? = null
 
+    /** Reading a USB stick needs the storage permission (asked when the USB tab opens). */
+    private val usbPermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            if (!granted) Toast.makeText(this, "The USB tab needs storage access to read the stick.", Toast.LENGTH_LONG).show()
+            refreshUsb()
+        }
+    private var usbPermissionAsked = false
+
     /** Storage permission puts the update in the public Downloads folder; without it, the app's own. */
     private val storagePermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { _ ->
@@ -278,14 +288,14 @@ class MainActivity : ComponentActivity() {
                 prefs.edit().putString(PREF_LAST_URL, it).apply()
                 addRecent(it)
             }
-            if (tab == Tab.USB) refreshUsb() // progress and the playing tile
+            if (tab == Tab.USB) refreshUsbPositions() // progress and the playing tile
             updateStatus()
         }
 
         override fun onIsPlayingChanged(isPlaying: Boolean) {
             // Playback restarted from elsewhere (notification, steering wheel, player controls).
             if (isPlaying && stopped) stopped = false
-            if (!isPlaying && tab == Tab.USB) refreshUsb() // show the new resume point
+            if (!isPlaying && tab == Tab.USB) refreshUsbPositions() // show the new resume point
             updateStatus()
         }
 
@@ -333,6 +343,7 @@ class MainActivity : ComponentActivity() {
         worker.execute { pruneArt(artDir) }
         val thumbDir = File(cacheDir, "usbthumbs")
         usbLoader = LogoLoader(thumbDir, usbThumbThread, handler)
+        usbLoader.holdFrames = { controller?.isPlaying == true && currentChannel?.source == Tab.USB }
         worker.execute { pruneFiles(thumbDir, MAX_USB_THUMBS) }
         registerReceiver(mountReceiver, IntentFilter().apply {
             addAction(Intent.ACTION_MEDIA_MOUNTED)
@@ -518,6 +529,7 @@ class MainActivity : ComponentActivity() {
         DeadStations.prefs(this).unregisterOnSharedPreferenceChangeListener(deadListener)
         runCatching { unregisterReceiver(mountReceiver) }
         usbThumbThread.shutdownNow()
+        usbThread.shutdownNow()
         handler.removeCallbacks(pollGate)
         handler.removeCallbacks(guideTick)
         settingsDialog?.dismiss()
@@ -1118,7 +1130,8 @@ class MainActivity : ComponentActivity() {
         }
         view.findViewById<TextView>(R.id.dataUsageText).text = DataUsage.summary(this)
         // Which playlist slot the buttons act on. Starts on the tab being viewed.
-        var slot = tab
+        // Playlist buttons act on a playlist tab; from the USB tab, start on My list.
+        var slot = tab.takeIf { it in Tab.PLAYLISTS } ?: Tab.MY_LIST
         val slotButtons = mapOf(
             Tab.RADIO to view.findViewById<Button>(R.id.slotRadio),
             Tab.TV to view.findViewById<Button>(R.id.slotTv),
@@ -1473,7 +1486,7 @@ class MainActivity : ComponentActivity() {
                 Uri.parse(ch.url).path?.let { playUsb(File(it)) }
                 return
             }
-            val channel = currentChannel ?: shown.firstOrNull()
+            val channel = currentChannel ?: shown.firstOrNull()?.takeIf { tab != Tab.USB }
             if (channel == null) {
                 message = "Pick a station to play"
                 updateStatus()
@@ -1483,6 +1496,8 @@ class MainActivity : ComponentActivity() {
             return
         }
         if (player.playbackState == Player.STATE_IDLE) player.prepare()
+        // The last USB episode finished: Play starts it again.
+        if (player.playbackState == Player.STATE_ENDED) player.seekTo(player.currentMediaItemIndex, 0L)
         player.playWhenReady = true
         stopped = false
         updateStatus()
@@ -1717,23 +1732,46 @@ class MainActivity : ComponentActivity() {
     // ---- USB ---------------------------------------------------------------------------------
 
     /** A row in the USB grid. */
-    private class UsbRow(val kind: Int, val entry: UsbEntry?, val position: UsbPositions.Entry?, val label: String)
+    private class UsbRow(
+        val kind: Int,
+        val entry: UsbEntry?,
+        val position: UsbPositions.Entry?,
+        val label: String,
+        /** Resume key (needs the file size, so made while listing, off the UI thread). */
+        val key: String? = null,
+    ) {
+        fun withPosition(p: UsbPositions.Entry?) = UsbRow(kind, entry, p, label, key)
+    }
+
+    /** Re-reads progress for the rows on screen (prefs only, no disk access to the stick). */
+    private fun refreshUsbPositions() {
+        usbRows = usbRows.map { row -> row.key?.let { row.withPosition(UsbPositions.get(this, it)) } ?: row }
+        usbAdapter.notifyDataSetChanged()
+    }
 
     /** Lists the USB folder on the worker thread, then shows it. */
     private fun refreshUsb() {
         val generation = ++usbGeneration
         val wantedDir = usbDir
         val q = query.trim()
-        worker.execute {
+        val permission = android.Manifest.permission.READ_EXTERNAL_STORAGE
+        if (tab == Tab.USB && checkSelfPermission(permission) != android.content.pm.PackageManager.PERMISSION_GRANTED && !usbPermissionAsked) {
+            usbPermissionAsked = true
+            usbPermission.launch(permission)
+        }
+        usbThread.execute {
             val roots = runCatching { UsbLibrary.roots(this) }.getOrDefault(emptyList())
-            val dir = wantedDir?.takeIf { d -> d.isDirectory && roots.any { d.path.startsWith(it.path) } }
+            val dir = wantedDir?.takeIf { d -> d.isDirectory && roots.any { isUnder(d, it) } }
             val top = dir ?: roots.singleOrNull()
             val rows = mutableListOf<UsbRow>()
-            if (dir != null && roots.none { it.path == dir.path }) rows += UsbRow(ROW_BACK, null, null, "‹ Back")
-            if (top == null || roots.any { it.path == top.path }) rows += continueRows(roots)
+            val atRoot = top == null || roots.any { it.path == top.path }
+            // Back: up a folder, or from a stick's top to the list of sticks (two or more).
+            if (dir != null && (!atRoot || roots.size > 1)) rows += UsbRow(ROW_BACK, null, null, "‹ Back")
+            if (atRoot) rows += continueRows(roots)
             if (top != null) {
                 runCatching { UsbLibrary.list(top) }.getOrDefault(emptyList()).forEach { e ->
-                    rows += UsbRow(if (e.isFolder) ROW_FOLDER else ROW_FILE, e, if (e.isFolder) null else UsbPositions.get(this, e.file), e.label)
+                    val key = if (e.isFolder) null else runCatching { UsbPositions.key(e.file) }.getOrNull()
+                    rows += UsbRow(if (e.isFolder) ROW_FOLDER else ROW_FILE, e, key?.let { UsbPositions.get(this, it) }, e.label, key)
                 }
             } else {
                 roots.forEach { rows += UsbRow(ROW_FOLDER, UsbEntry(it, true, "USB stick · ${it.name}", null), null, "USB stick · ${it.name}") }
@@ -1768,12 +1806,12 @@ class MainActivity : ComponentActivity() {
             val file = roots.asSequence().map { File(it, rel) }.firstOrNull { it.isFile && it.length() == size } ?: return@mapNotNull null
             val entry = UsbLibrary.fileEntry(file)
             val show = entry.episode?.show ?: file.parentFile?.name
-            UsbRow(ROW_CONTINUE, entry, position, listOfNotNull("Continue", show, entry.episode?.code).joinToString(" · "))
+            UsbRow(ROW_CONTINUE, entry, position, listOfNotNull("Continue", show, entry.episode?.code).joinToString(" · "), key)
         }
 
     private fun usbTitle(dir: File?): String {
         if (dir == null) return "USB"
-        val root = usbRoots.firstOrNull { dir.path.startsWith(it.path) } ?: return "USB"
+        val root = usbRoots.firstOrNull { isUnder(dir, it) } ?: return "USB"
         val rel = dir.path.removePrefix(root.path).trim('/')
         return if (rel.isEmpty()) "USB" else "USB › " + rel.split('/').joinToString(" › ")
     }
@@ -1781,8 +1819,10 @@ class MainActivity : ComponentActivity() {
     private fun usbClick(row: UsbRow) {
         when (row.kind) {
             ROW_BACK -> {
-                val parent = usbShownDir?.parentFile
-                usbDir = parent?.takeIf { p -> usbRoots.any { p.path.startsWith(it.path) && p.path.length >= it.path.length } }
+                val shown = usbShownDir
+                // From a stick's top folder, back goes to the list of sticks.
+                usbDir = if (shown == null || usbRoots.any { it.path == shown.path }) null
+                else shown.parentFile?.takeIf { p -> usbRoots.any { isUnder(p, it) } }
                 refreshUsb()
             }
             ROW_FOLDER -> {
@@ -1795,31 +1835,32 @@ class MainActivity : ComponentActivity() {
 
     /** Long-press an episode: mark it watched, or unwatched if it already is. */
     private fun toggleWatched(row: UsbRow) {
-        val entry = row.entry ?: return
-        if (entry.isFolder) return
-        worker.execute {
-            val current = UsbPositions.get(this, entry.file)
-            if (current?.watched == true) {
-                UsbPositions.save(this, entry.file, 0L, current.durationMs)
-            } else {
-                UsbPositions.markWatched(this, entry.file, current?.durationMs?.takeIf { it > 0 } ?: 1L)
-            }
-            handler.post { refreshUsb() }
+        val key = row.key ?: return
+        val current = UsbPositions.get(this, key)
+        if (current?.watched == true) {
+            UsbPositions.save(this, key, 0L, current.durationMs)
+        } else {
+            UsbPositions.markWatched(this, key, current?.durationMs?.takeIf { it > 0 } ?: 1L)
         }
+        refreshUsbPositions()
     }
+
+    /** [file] is [root] or inside it (not just a path that starts the same, like /storage/AB2). */
+    private fun isUnder(file: File, root: File): Boolean =
+        file.path == root.path || file.path.startsWith(root.path.trimEnd('/') + "/")
 
     /** Plays [file], then the rest of its folder (and following seasons) in order. */
     private fun playUsb(file: File) {
         val player = controller ?: return
         val subtitles = prefs.getBoolean(PREF_USB_SUBTITLES, true)
-        worker.execute {
-            val files = UsbLibrary.playlistFor(file)
-            val entries = files.map { UsbLibrary.fileEntry(it) }
-            val items = entries.map { mediaItemForFile(it, subtitles) }
+        usbThread.execute {
+            val list = runCatching { UsbLibrary.playlistItems(file) }.getOrDefault(emptyList())
+            if (list.isEmpty()) return@execute
+            val items = list.map { mediaItemForFile(it.entry, if (subtitles) it.subtitle else null) }
             handler.post {
                 if (isDestroyed) return@post
-                val index = files.indexOfFirst { it.path == file.path }.coerceAtLeast(0)
-                val channel = usbChannel(entries[index])
+                val index = list.indexOfFirst { it.entry.file.path == file.path }.coerceAtLeast(0)
+                val channel = usbChannel(list[index].entry)
                 currentChannel = channel
                 currentChannelName = channel.name
                 currentTvgId = null
@@ -1855,10 +1896,10 @@ class MainActivity : ComponentActivity() {
         source = Tab.USB,
     )
 
-    /** A USB file as a media item, with any subtitle files next to it. Reads the folder: worker thread. */
-    private fun mediaItemForFile(entry: UsbEntry, subtitles: Boolean): MediaItem {
+    /** A USB file as a media item, with its subtitle file if there is one. */
+    private fun mediaItemForFile(entry: UsbEntry, subtitle: File?): MediaItem {
         val uri = Uri.fromFile(entry.file)
-        val subs = if (subtitles) UsbLibrary.subtitlesFor(entry.file).mapNotNull { sub ->
+        val subs = listOfNotNull(subtitle).mapNotNull { sub ->
             val mime = when (sub.extension.lowercase()) {
                 "srt" -> MimeTypes.APPLICATION_SUBRIP
                 "ass", "ssa" -> MimeTypes.TEXT_SSA
@@ -1869,7 +1910,7 @@ class MainActivity : ComponentActivity() {
                 .setMimeType(mime)
                 .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
                 .build()
-        }.take(1) else emptyList()
+        }
         return MediaItem.Builder()
             .setMediaId(uri.toString())
             .setUri(uri)
@@ -1888,12 +1929,12 @@ class MainActivity : ComponentActivity() {
     private fun usbChanged(path: String?, removed: Boolean) {
         if (removed && path != null) {
             val playingPath = Uri.parse(playingUrl ?: "").takeIf { it.scheme == "file" }?.path
-            if (playingPath != null && playingPath.startsWith(path)) {
+            if (playingPath != null && isUnder(File(playingPath), File(path))) {
                 stopPlayback()
                 message = "USB stick removed"
                 updateStatus()
             }
-            if (usbDir?.path?.startsWith(path) == true) usbDir = null
+            if (usbDir?.let { isUnder(it, File(path)) } == true) usbDir = null
         }
         refreshUsb()
     }

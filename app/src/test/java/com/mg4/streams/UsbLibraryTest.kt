@@ -66,4 +66,17 @@ class UsbLibraryTest {
         assertFalse(UsbPositions.parse("60000|1260000|5")!!.watched)
         assertNull(UsbPositions.parse("x"))
     }
+
+    @Test fun reviewEdgeCases() {
+        val u = UsbLibrary.parseName("Show_S01E02_Pilot")
+        assertEquals(1, u.season); assertEquals(2, u.episode); assertEquals("Pilot", u.title)
+        assertEquals("Spider Web", UsbLibrary.parseName("Show - S01E01 - Spider Web", 1, "Show").title)
+        assertEquals("Spider", UsbLibrary.parseName("Show.S01E01.Spider.1080p.WEB.x264").title)
+        assertEquals("Pilot & More", UsbLibrary.nfoTitle("<title><![CDATA[Pilot & More]]></title>"))
+        assertEquals(1, UsbLibrary.seasonNumber("Season 1 (2019)"))
+        assertEquals(1, UsbLibrary.seasonNumber("Season 01 - The Beginning"))
+        assertNull(UsbLibrary.seasonNumber("Season of the Witch"))
+        val names = setOf("Ep 1.mkv", "Ep 1.en.srt", "Ep 1.srt", "Ep 10.srt")
+        assertEquals("Ep 1.srt", UsbLibrary.subtitleIn(java.io.File("/x/Ep 1.mkv"), names)?.name)
+    }
 }

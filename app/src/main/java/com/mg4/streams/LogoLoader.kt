@@ -33,6 +33,14 @@ class LogoLoader(
     private val failedAt = HashMap<String, Long>()
     /** URL -> views waiting for it. */
     private val inFlight = HashMap<String, MutableList<ImageView>>()
+    /** Folder path -> its first video (empty string: none), so folder stills don't re-list. */
+    private val folderVideo = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    /**
+     * True while video stills must not be made (a video is playing: grabbing a frame opens a
+     * second hardware decoder and reads the same stick). Those tiles stay blank until later.
+     */
+    var holdFrames: () -> Boolean = { false }
 
     fun load(url: String?, view: ImageView) {
         // Already showing this logo (the grid refreshes on every station change): leave it, so
@@ -42,6 +50,7 @@ class LogoLoader(
         view.setImageDrawable(null)
         if (url == null) return
         memory.get(url)?.let { view.setImageBitmap(it); return }
+        if (url.startsWith("frame://") && holdFrames()) return
         failedAt[url]?.let { at ->
             if (SystemClock.elapsedRealtime() - at < FAIL_RETRY_MS) return
             failedAt.remove(url)
@@ -84,18 +93,30 @@ class LogoLoader(
      * Read-only on the stick: the image is written to the app's cache.
      */
     private fun frameFile(source: File): File? {
-        val video = if (source.isDirectory) UsbLibrary.firstVideo(source) ?: return null else source
+        val video = if (source.isDirectory) {
+            val found = folderVideo.getOrPut(source.path) { UsbLibrary.firstVideo(source)?.path.orEmpty() }
+            if (found.isEmpty()) return null
+            File(found)
+        } else source
         if (!video.isFile) return null
         dir.mkdirs()
-        val out = File(dir, sha1("${video.path}|${video.length()}|${video.lastModified()}") + ".jpg")
+        val key = sha1("${video.path}|${video.length()}|${video.lastModified()}")
+        val out = File(dir, "$key.jpg")
         if (out.exists()) return out
+        // A file that failed before (unsupported, damaged): don't try again on every scroll.
+        val failed = File(dir, "$key.none")
+        if (failed.exists()) return null
         val retriever = android.media.MediaMetadataRetriever()
         try {
             retriever.setDataSource(video.path)
             val duration = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
             // A fifth of the way in (at most 2 minutes), past the titles.
             val atMs = (duration / 5).coerceAtMost(120_000L)
-            val frame = retriever.getFrameAtTime(atMs * 1000, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC) ?: return null
+            val frame = retriever.getFrameAtTime(atMs * 1000, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+            if (frame == null) {
+                runCatching { failed.createNewFile() }
+                return null
+            }
             val scale = TARGET_SIDE.toFloat() / maxOf(frame.width, frame.height)
             val small = if (scale < 1f) {
                 Bitmap.createScaledBitmap(frame, (frame.width * scale).toInt().coerceAtLeast(1), (frame.height * scale).toInt().coerceAtLeast(1), true)
@@ -107,6 +128,7 @@ class LogoLoader(
             if (!temp.renameTo(out)) temp.delete()
             return out.takeIf { it.exists() }
         } catch (_: Exception) {
+            runCatching { failed.createNewFile() }
             return null
         } finally {
             runCatching { retriever.release() }
