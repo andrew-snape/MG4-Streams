@@ -382,15 +382,6 @@ class MainActivity : ComponentActivity() {
             query = text?.toString().orEmpty()
             refreshShown()
         }
-        searchInput.setOnTouchListener { _, event ->
-            // Keyboard only when parked. While driving, a tap just explains why.
-            if (!videoAllowed) {
-                if (event.action == MotionEvent.ACTION_UP) showParkedOnly()
-                true
-            } else {
-                false
-            }
-        }
         searchInput.setOnEditorActionListener { _, _, _ -> hideKeyboard(); true }
         settingsButton.setOnClickListener { showSettings() }
 
@@ -1033,15 +1024,7 @@ class MainActivity : ComponentActivity() {
 
     // ---- Settings and the parked-only controls ------------------------------------------------
 
-    private fun showParkedOnly() {
-        Toast.makeText(this, "Available when parked", Toast.LENGTH_SHORT).show()
-    }
-
     private fun showSettings() {
-        if (!videoAllowed) {
-            showParkedOnly()
-            return
-        }
         if (settingsDialog != null) return
         val view = LayoutInflater.from(this).inflate(R.layout.dialog_settings, null)
         val urlInput = view.findViewById<EditText>(R.id.urlInput)
@@ -1055,6 +1038,12 @@ class MainActivity : ComponentActivity() {
         dimSwitch.setOnCheckedChangeListener { _, checked ->
             prefs.edit().putBoolean(PREF_NIGHT_DIM, checked).apply()
             updateDim()
+        }
+        val simpleSwitch = view.findViewById<Switch>(R.id.simpleDrivingSwitch)
+        simpleSwitch.isChecked = prefs.getBoolean(PREF_SIMPLE_DRIVING, false)
+        simpleSwitch.setOnCheckedChangeListener { _, checked ->
+            prefs.edit().putBoolean(PREF_SIMPLE_DRIVING, checked).apply()
+            refreshPresets() // also re-applies the layout
         }
         val artSwitch = view.findViewById<Switch>(R.id.albumArtSwitch)
         artSwitch.isChecked = prefs.getBoolean(PlaybackService.PREF_ALBUM_ART, true)
@@ -1281,25 +1270,16 @@ class MainActivity : ComponentActivity() {
     }
 
     /** Search and settings are usable only while parked. While driving they're hidden. */
-    private fun updateParkedUi() {
-        val allowed = videoAllowed
-        searchInput.isFocusable = allowed
-        searchInput.isFocusableInTouchMode = allowed
-        if (!allowed) {
-            searchInput.clearFocus()
-            hideKeyboard()
-            settingsDialog?.dismiss()
-        }
-        updateDrivingUi()
-    }
+    private fun updateParkedUi() = updateDrivingUi()
 
     /**
-     * Driving layout whenever video isn't allowed (not P, or the gear is unknown): no grid,
-     * search, settings or tabs; a row of six presets; bigger text and previous/next buttons.
-     * Parked: the full layout.
+     * The station grid, tabs, search and Settings stay available while driving; only video
+     * needs P. If "Simple driving screen" is on in Settings, then whenever video isn't allowed the
+     * grid, search, settings and tabs give way to a row of six presets with bigger text and
+     * previous/next buttons.
      */
     private fun updateDrivingUi() {
-        val driving = !videoAllowed
+        val driving = !videoAllowed && prefs.getBoolean(PREF_SIMPLE_DRIVING, false)
         val presetsVisible = driving && presets.isNotEmpty()
         presetRow.visibility = if (presetsVisible) View.VISIBLE else View.GONE
         presetEmpty.visibility = if (driving && presets.isEmpty()) View.VISIBLE else View.GONE
@@ -1704,6 +1684,7 @@ class MainActivity : ComponentActivity() {
         const val PREF_RECENTS = "recents"
         const val PREF_COMPACT = "compactGrid"
         const val PREF_NIGHT_DIM = "nightDim"
+        const val PREF_SIMPLE_DRIVING = "simpleDriving"
         const val PRESET_COUNT = 6
         const val DRIVING_CONTROL_PX = 110
         const val NIGHT_START_HOUR = 19

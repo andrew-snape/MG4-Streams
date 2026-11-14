@@ -14,7 +14,7 @@ Unofficial. Not affiliated with MG or SAIC. Use at your own risk.
 - **TV guide (EPG):** read from the playlist's `x-tvg-url` (XMLTV, gzip or plain). Shows now/next for each channel.
 - **Per-channel headers:** `#EXTVLCOPT:http-user-agent` / `http-referrer` and Kodi-style `URL|User-Agent=...` are sent on every request, including HLS segments.
 - **Reconnects by itself:** waits for the network at car start (for example before a phone hotspot connects), and retries dropped or expired streams.
-- **Driving mode:** whenever the car isn't in P, the grid, search and settings disappear. Six big presets (favourites, then recently played), larger text and buttons. Previous/next step through the presets. Swipe the logo to change station.
+- **Driving:** the full station grid, tabs, search and Settings work in any gear; only video needs P. Optional **Simple driving screen** (Settings): when not in P, six big presets (favourites, then recently played), larger text and buttons, and previous/next step through the presets. Swipe the logo to change station.
 - **Parked extras:** 640 × 360 video, group chips for TV, a programme progress bar, 3 or 5 column grid, Favs / Recent / All.
 - **Connection chip and Retry:** shows Car internet / Wi-Fi / Offline / Reconnecting; a Retry button after a failure, with a hint when a channel blocks the car's internet.
 - **Data use:** today and this month, by connection, in Settings.
@@ -26,7 +26,6 @@ Unofficial. Not affiliated with MG or SAIC. Use at your own risk.
 ## Safety
 
 - Video plays only when the gear reads **P**. It fails closed: an unknown, unreadable or stale gear reading means no video. Audio is never blocked.
-- Search and Settings, which need the keyboard, also only open in P.
 - Car access is **read-only**: one Binder lookup on the SAIC vehicle hub (`vehiclecondition`) and one gear read. See `SaicGearGate.kt`. Nothing is written to the car.
 
 ## Playlists

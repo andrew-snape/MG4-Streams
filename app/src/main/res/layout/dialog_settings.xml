@@ -117,6 +117,13 @@
             android:textSize="22sp" />
 
         <Switch
+            android:id="@+id/simpleDrivingSwitch"
+            android:layout_width="match_parent"
+            android:layout_height="88dp"
+            android:text="Simple driving screen (six presets only, when not in P)"
+            android:textSize="22sp" />
+
+        <Switch
             android:id="@+id/albumArtSwitch"
             android:layout_width="match_parent"
             android:layout_height="88dp"
