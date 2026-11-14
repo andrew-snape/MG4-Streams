@@ -48,6 +48,11 @@
                 style="@style/TabButton"
                 android:text="My list" />
 
+            <TextView
+                android:id="@+id/tabUsb"
+                style="@style/TabButton"
+                android:text="USB" />
+
             <View
                 android:layout_width="0dp"
                 android:layout_height="1dp"

@@ -17,6 +17,14 @@ import androidx.media3.common.TrackSelectionParameters
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.HttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
+import androidx.media3.exoplayer.DefaultRenderersFactory
+import androidx.media3.exoplayer.Renderer
+import androidx.media3.exoplayer.audio.AudioRendererEventListener
+import androidx.media3.exoplayer.audio.AudioSink
+import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
+import androidx.media3.decoder.ffmpeg.FfmpegAudioRenderer
+import androidx.media3.decoder.ffmpeg.FfmpegLibrary
+import java.io.File
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
@@ -76,6 +84,17 @@ class PlaybackService : MediaSessionService() {
     /** Failed stations skipped in a row; capped so a dead network doesn't spin the playlist. */
     private var autoSkips = 0
 
+    // ---- USB files: resume points ----
+    /** The USB file playing and its length, from the last save. */
+    private var usbFile: File? = null
+    private var usbDurationMs = 0L
+    private val positionRunnable = object : Runnable {
+        override fun run() {
+            saveUsbPosition()
+            handler.postDelayed(this, POSITION_SAVE_MS)
+        }
+    }
+
     // ---- Album art ----
     private val artExecutor = Executors.newSingleThreadExecutor()
     /** The stream title the art was last looked up for. */
@@ -86,7 +105,9 @@ class PlaybackService : MediaSessionService() {
 
         override fun onPlaybackStateChanged(state: Int) {
             when (state) {
+                Player.STATE_ENDED -> usbFile?.let { UsbPositions.markWatched(this@PlaybackService, it, usbDurationMs) }
                 Player.STATE_READY -> {
+                    saveUsbPosition()
                     resetRetries(clearStatus = true)
                     autoSkips = 0
                     // The step has landed: a later failure on this station is not a skip.
@@ -100,7 +121,21 @@ class PlaybackService : MediaSessionService() {
         }
 
         override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
-            if (!playWhenReady) resetRetries(clearStatus = true)
+            if (!playWhenReady) {
+                resetRetries(clearStatus = true)
+                saveUsbPosition()
+            }
+        }
+
+        override fun onPositionDiscontinuity(old: Player.PositionInfo, new: Player.PositionInfo, reason: Int) {
+            // Leaving a USB file: finished (played to the end) or stopped part-way (next/previous).
+            val file = usbFile ?: return
+            if (old.mediaItemIndex == new.mediaItemIndex) return
+            if (reason == Player.DISCONTINUITY_REASON_AUTO_TRANSITION) {
+                UsbPositions.markWatched(this@PlaybackService, file, usbDurationMs)
+            } else if (usbDurationMs > 0) {
+                UsbPositions.save(this@PlaybackService, file, old.positionMs, usbDurationMs)
+            }
         }
 
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
@@ -109,7 +144,8 @@ class PlaybackService : MediaSessionService() {
             droppedThisItem = false
             artTitle = null
             sessionPlayer.setArtwork(null)
-            onStationChanged(reason)
+            onUsbItem(mediaItem)
+            if (fileOf(mediaItem) == null) onStationChanged(reason)
         }
 
         override fun onMediaMetadataChanged(mediaMetadata: MediaMetadata) = maybeLookUpArt(mediaMetadata)
@@ -176,7 +212,7 @@ class PlaybackService : MediaSessionService() {
                 /* bufferForPlaybackAfterRebufferMs = */ 2_000,
             )
             .build()
-        player = ExoPlayer.Builder(this)
+        player = ExoPlayer.Builder(this, FfmpegRenderersFactory(this))
             .setMediaSourceFactory(StreamMediaSourceFactory(this))
             .setLoadControl(loadControl)
             .setAudioAttributes(audioAttributes, /* handleAudioFocus = */ true)
@@ -200,6 +236,7 @@ class PlaybackService : MediaSessionService() {
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = session
 
     override fun onDestroy() {
+        saveUsbPosition()
         handler.removeCallbacksAndMessages(null)
         artExecutor.shutdownNow()
         runCatching { DataUsage.sample(this) }
@@ -220,6 +257,11 @@ class PlaybackService : MediaSessionService() {
         if (!player.playWhenReady || !isRetryable(error)) {
             setStatus("Can't play: $reason")
             gaveUp(error)
+            return
+        }
+        if (fileOf(player.currentMediaItem) != null) {
+            // A file on the USB stick: retrying or waiting for internet won't help.
+            setStatus("Can't play this file: $reason")
             return
         }
         if (!isNetworkUp()) {
@@ -254,6 +296,36 @@ class PlaybackService : MediaSessionService() {
         attempts++
         setStatus("Reconnecting ($attempts of ${RETRY_DELAYS_MS.size}): $reason")
         handler.postDelayed(retryRunnable, delay)
+    }
+
+    /** The local file behind [item], or null for a stream. */
+    private fun fileOf(item: MediaItem?): File? {
+        val uri = item?.localConfiguration?.uri ?: return null
+        return if (uri.scheme == "file") uri.path?.let(::File) else null
+    }
+
+    /** A USB file started: resume where it was stopped, and save the position every few seconds. */
+    private fun onUsbItem(item: MediaItem?) {
+        handler.removeCallbacks(positionRunnable)
+        val file = fileOf(item)
+        usbFile = file
+        usbDurationMs = 0L
+        if (file == null) return
+        val start = UsbPositions.startPosition(this, file)
+        if (start > 0) {
+            val index = player.currentMediaItemIndex
+            handler.post { if (player.currentMediaItemIndex == index) player.seekTo(index, start) }
+        }
+        handler.postDelayed(positionRunnable, POSITION_SAVE_MS)
+    }
+
+    private fun saveUsbPosition() {
+        val file = usbFile ?: return
+        if (fileOf(player.currentMediaItem)?.path != file.path) return
+        val duration = player.duration
+        if (duration == C.TIME_UNSET || duration <= 0) return
+        usbDurationMs = duration
+        UsbPositions.save(this, file, player.currentPosition, duration)
     }
 
     private fun currentUrl(): String? = player.currentMediaItem?.let { item ->
@@ -316,6 +388,7 @@ class PlaybackService : MediaSessionService() {
      * to the next one (at most [MAX_AUTO_SKIPS] in a row).
      */
     private fun gaveUp(error: PlaybackException) {
+        if (usbFile != null) return // files aren't stations
         if (!player.playWhenReady || !isInternetValidated() || isConnectionError(error)) return
         val url = currentUrl() ?: return
         DeadStations.mark(this, url)
@@ -330,6 +403,7 @@ class PlaybackService : MediaSessionService() {
      */
     private fun maybeLookUpArt(metadata: MediaMetadata) {
         val item = player.currentMediaItem ?: return
+        if (fileOf(item) != null) return // USB: the file's own metadata only
         val title = metadata.title?.toString()?.trim().orEmpty()
         if (title == artTitle) return
         artTitle = title
@@ -458,10 +532,38 @@ class PlaybackService : MediaSessionService() {
         const val PREFS = "mg4_streams"
         const val PREF_ALBUM_ART = "albumArt"
         private const val MAX_AUTO_SKIPS = 3
+        private const val POSITION_SAVE_MS = 10_000L
         private val RETRY_DELAYS_MS = longArrayOf(1_000, 2_000, 4_000, 8_000, 15_000, 15_000)
         private const val NETWORK_POLL_MS = 15_000L
         private const val MAX_NETWORK_WAIT_MS = 5 * 60_000L
         private const val DROP_DELAY_MS = 10_000L
         private const val DATA_SAMPLE_MS = 30_000L
+    }
+}
+
+/**
+ * The usual renderers, plus FFmpeg audio decoding (AC3, E-AC3, DTS, TrueHD...) after the head
+ * unit's own decoders, for USB videos with Dolby or DTS sound. Added directly, not found by
+ * reflection, so the release build's shrinking can't drop it.
+ */
+@UnstableApi
+private class FfmpegRenderersFactory(context: Context) : DefaultRenderersFactory(context) {
+    override fun buildAudioRenderers(
+        context: Context,
+        extensionRendererMode: Int,
+        mediaCodecSelector: MediaCodecSelector,
+        enableDecoderFallback: Boolean,
+        audioSink: AudioSink,
+        eventHandler: Handler,
+        eventListener: AudioRendererEventListener,
+        out: ArrayList<Renderer>,
+    ) {
+        super.buildAudioRenderers(
+            context, EXTENSION_RENDERER_MODE_OFF, mediaCodecSelector, enableDecoderFallback,
+            audioSink, eventHandler, eventListener, out,
+        )
+        if (runCatching { FfmpegLibrary.isAvailable() }.getOrDefault(false)) {
+            out.add(FfmpegAudioRenderer(eventHandler, eventListener, audioSink))
+        }
     }
 }

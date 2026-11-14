@@ -1,11 +1,15 @@
 package com.mg4.streams
 
-/** The three top-bar tabs. Each has its own playlist file. */
+/** The top-bar tabs. Radio, TV and My list each have a playlist file; USB browses the stick. */
 enum class Tab(val label: String) {
-    RADIO("Radio"), TV("TV"), MY_LIST("My list");
+    RADIO("Radio"), TV("TV"), MY_LIST("My list"),
+    /** Files on a USB stick (no playlist file). */
+    USB("USB");
 
     companion object {
         fun fromName(name: String?): Tab = values().firstOrNull { it.name == name } ?: RADIO
+        /** The tabs that come from playlist files. */
+        val PLAYLISTS = listOf(RADIO, TV, MY_LIST)
     }
 }
 

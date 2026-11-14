@@ -5,7 +5,7 @@ plugins {
 
 android {
     namespace = "com.mg4.streams"
-    compileSdk = 34
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "com.mg4.streams"
@@ -13,6 +13,8 @@ android {
         targetSdk = 28
         versionCode = 7
         versionName = "0.5.1"
+        // The head unit is ARM (MediaTek MT2712); drop the x86 copies of the FFmpeg library.
+        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
         // GitHub "owner/repo" the in-app updater checks for releases. Change it in a fork.
         buildConfigField("String", "UPDATE_REPO", "\"andrew-snape/MG4-Streams\"")
     }
@@ -49,10 +51,13 @@ android {
 
 dependencies {
     implementation("androidx.activity:activity:1.9.2")
-    implementation("androidx.media3:media3-exoplayer:1.4.1")
-    implementation("androidx.media3:media3-exoplayer-hls:1.4.1")
-    implementation("androidx.media3:media3-ui:1.4.1")
-    implementation("androidx.media3:media3-session:1.4.1")
+    implementation("androidx.media3:media3-exoplayer:1.5.0")
+    implementation("androidx.media3:media3-exoplayer-hls:1.5.0")
+    implementation("androidx.media3:media3-ui:1.5.0")
+    implementation("androidx.media3:media3-session:1.5.0")
+    // FFmpeg audio decoders (AC3, E-AC3, DTS, TrueHD...) the head unit lacks, for USB video.
+    // Jellyfin's prebuilt Media3 extension; its version must match the Media3 version above.
+    implementation("org.jellyfin.media3:media3-ffmpeg-decoder:1.5.0+1")
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("com.google.guava:guava:33.2.1-android")
     testImplementation("junit:junit:4.13.2")

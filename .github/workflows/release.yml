@@ -97,7 +97,7 @@ jobs:
           java-version: '17'
       - uses: android-actions/setup-android@v4
         with:
-          packages: platform-tools platforms;android-34 build-tools;34.0.0
+          packages: platform-tools platforms;android-35 build-tools;34.0.0
       - uses: gradle/actions/setup-gradle@v6
       - name: Test and build the release APK
         run: ./gradlew testDebugUnitTest assembleRelease --stacktrace

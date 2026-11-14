@@ -124,6 +124,13 @@
             android:textSize="22sp" />
 
         <Switch
+            android:id="@+id/subtitlesSwitch"
+            android:layout_width="match_parent"
+            android:layout_height="88dp"
+            android:text="Subtitles on USB videos (when a .srt file is next to the video)"
+            android:textSize="22sp" />
+
+        <Switch
             android:id="@+id/albumArtSwitch"
             android:layout_width="match_parent"
             android:layout_height="88dp"

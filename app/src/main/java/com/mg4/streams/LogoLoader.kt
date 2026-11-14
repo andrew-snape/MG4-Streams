@@ -70,7 +70,50 @@ class LogoLoader(
     }
 
     private fun fetch(address: String): Bitmap? {
-        if (!address.startsWith("http://", true) && !address.startsWith("https://", true)) return null
+        val file = when {
+            address.startsWith("file://") -> File(address.removePrefix("file://")).takeIf { it.isFile } ?: return null
+            address.startsWith("frame://") -> frameFile(File(address.removePrefix("frame://"))) ?: return null
+            address.startsWith("http://", true) || address.startsWith("https://", true) -> download(address) ?: return null
+            else -> return null
+        }
+        return decode(file, deleteIfBad = !address.startsWith("file://"))
+    }
+
+    /**
+     * A still from a video (or, for a folder, from its first video), made once and kept in [dir].
+     * Read-only on the stick: the image is written to the app's cache.
+     */
+    private fun frameFile(source: File): File? {
+        val video = if (source.isDirectory) UsbLibrary.firstVideo(source) ?: return null else source
+        if (!video.isFile) return null
+        dir.mkdirs()
+        val out = File(dir, sha1("${video.path}|${video.length()}|${video.lastModified()}") + ".jpg")
+        if (out.exists()) return out
+        val retriever = android.media.MediaMetadataRetriever()
+        try {
+            retriever.setDataSource(video.path)
+            val duration = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+            // A fifth of the way in (at most 2 minutes), past the titles.
+            val atMs = (duration / 5).coerceAtMost(120_000L)
+            val frame = retriever.getFrameAtTime(atMs * 1000, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC) ?: return null
+            val scale = TARGET_SIDE.toFloat() / maxOf(frame.width, frame.height)
+            val small = if (scale < 1f) {
+                Bitmap.createScaledBitmap(frame, (frame.width * scale).toInt().coerceAtLeast(1), (frame.height * scale).toInt().coerceAtLeast(1), true)
+            } else frame
+            val temp = File.createTempFile(out.name, ".tmp", dir)
+            temp.outputStream().use { small.compress(Bitmap.CompressFormat.JPEG, 80, it) }
+            if (small !== frame) small.recycle()
+            frame.recycle()
+            if (!temp.renameTo(out)) temp.delete()
+            return out.takeIf { it.exists() }
+        } catch (_: Exception) {
+            return null
+        } finally {
+            runCatching { retriever.release() }
+        }
+    }
+
+    private fun download(address: String): File? {
         dir.mkdirs()
         val file = File(dir, sha1(address))
         if (!file.exists()) {
@@ -99,6 +142,11 @@ class LogoLoader(
                 temp.delete()
             }
         }
+        return file
+    }
+
+    private fun decode(file: File, deleteIfBad: Boolean): Bitmap? {
+        if (file.length() > MAX_BYTES * 4) return null
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeFile(file.path, bounds)
         // Largest power-of-two sample that keeps the longer side at least TARGET_SIDE.
@@ -111,7 +159,7 @@ class LogoLoader(
             },
         )
         if (bitmap == null) {
-            file.delete()
+            if (deleteIfBad) file.delete() // never delete the user's own files
             return null
         }
         // Scale down to TARGET_SIDE so the memory cache holds a full screen of tiles.

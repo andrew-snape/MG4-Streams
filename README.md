@@ -1,11 +1,12 @@
 # MG4 Streams
 
-Internet radio and IPTV player for the MG4 head unit (SAIC, Android 9, 1778 × 720 screen). It plays your own M3U/M3U8 playlists, keeps audio playing in the background, and shows **video only when the car is in P**.
+Internet radio, IPTV and USB video player for the MG4 head unit (SAIC, Android 9, 1778 × 720 screen). It plays your own M3U/M3U8 playlists and TV shows from a USB stick, keeps audio playing in the background, and shows **video only when the car is in P**.
 
 Unofficial. Not affiliated with MG or SAIC. Use at your own risk.
 
 ## Features
 
+- **USB TV shows:** a USB tab browses the stick by folder (Show / Season 1 / episodes), sorted naturally (E2 before E10). Episode names come from the file name (`S01E02`, `1x02`, `Show - S01E02 - Title`) or a Kodi/Plex `.nfo`; posters from `poster.jpg`/`folder.jpg`, otherwise a still from the video. Each episode remembers where you stopped and shows a progress bar; finished ones get a ✓ (long-press to toggle). The next episode plays automatically, into the next season. **Continue** tiles at the top resume unfinished episodes. `.srt`/`.ass`/`.vtt` subtitles next to the video load automatically. Nothing is written to the stick.
 - **Three playlists, one per tab:** Radio, TV and My list. Each is added from a URL, imported from a file, or set up from a text file of addresses on a USB stick. URLs are saved and updated once a day, or on demand.
 - **Updates from GitHub:** checks this repo's latest release once a day. Settings downloads it to Downloads; tap it there to install.
 - **Big, car-sized controls:** a now-playing panel with logo, name and song or programme, and a large Play/Stop button. A logo grid with favourites (long-press a station to add it).
@@ -54,7 +55,24 @@ https://example.com/my-playlist-2.m3u
 
 Only `http://` and `https://` entries are kept. Supported tags: `#EXTINF` (name, `group-title`, `tvg-logo`, `tvg-id`/`channel-id`), `#EXTVLCOPT`, and `x-tvg-url`/`url-tvg` in the `#EXTM3U` header.
 
-Formats: whatever the head unit's Android decoders handle. H.264 and AAC play. AC3 audio and AV1 video generally don't.
+Formats: whatever the head unit decodes, plus Dolby and DTS audio through the built-in FFmpeg decoder.
+
+### USB video formats
+
+The head unit (MediaTek MT2712) decodes in hardware: **H.264, HEVC (H.265), VP9, VP8, MPEG-4 Part 2 (DivX/Xvid), MPEG-2**. Not AV1. Audio: AAC, MP3, Opus, Vorbis, FLAC on the head unit, and **AC3, E-AC3 (DD+), DTS and TrueHD** through the app's FFmpeg decoder (5.1 is mixed down to stereo).
+
+Files: MP4, M4V, MOV, MKV, WebM, TS/M2TS, AVI, FLV, MPG, 3GP. Not WMV or RM. Best: H.264 or HEVC up to 1080p in MP4 or MKV. 4K and 10-bit HEVC are untested.
+
+Suggested layout:
+
+```
+TV/
+  Bluey/
+    poster.jpg
+    Season 1/
+      Bluey - S01E01 - Magic Xylophone.mp4
+      Bluey - S01E01 - Magic Xylophone.srt
+```
 
 ## Build
 
@@ -64,7 +82,7 @@ Requirements: JDK 17, Android SDK (compileSdk 34). Create `local.properties` wit
 ./gradlew testDebugUnitTest lintDebug assembleRelease
 ```
 
-The release build uses R8 (`isMinifyEnabled`, `isShrinkResources`) to remove unused code from Media3, Guava and Kotlin, and unused resources: about 2.7 MB instead of 14 MB for the debug build. It comes out unsigned (`app/build/outputs/apk/release/app-release-unsigned.apk`) and is signed with the platform key afterwards.
+The release build uses R8 (`isMinifyEnabled`, `isShrinkResources`) to remove unused code from Media3, Guava and Kotlin, and unused resources: about 5.3 MB (2.6 MB of it is the FFmpeg audio decoder), much smaller than the debug build. It comes out unsigned (`app/build/outputs/apk/release/app-release-unsigned.apk`) and is signed with the platform key afterwards.
 
 GitHub Actions runs the same checks on every push to `main` and on pull requests (`.github/workflows/android.yml`), plus `scripts/check_public_tree.py`, which fails if a key file, an APK or an iCloud duplicate (`name 2.kt`) is committed.
 
@@ -126,7 +144,7 @@ scripts/release.sh 0.5.2 --local --no-publish                 # only dist/MG4Str
 | File | Role |
 |---|---|
 | `MainActivity.kt` | Screen, playlists, controller connection, video gate |
-| `PlaybackService.kt` | Media3 `MediaSessionService` that owns ExoPlayer: background audio, audio focus, retries |
+| `PlaybackService.kt` | Media3 `MediaSessionService` that owns ExoPlayer: background audio, audio focus, retries, FFmpeg audio (Dolby/DTS), USB resume points |
 | `StreamMediaSourceFactory.kt` | Per-channel HTTP headers on every request |
 | `SaicGearGate.kt` / `ParkedGate.kt` | Read-only gear check over Binder |
 | `M3uParser.kt` | Playlist parser |
@@ -137,6 +155,7 @@ scripts/release.sh 0.5.2 --local --no-publish                 # only dist/MG4Str
 | `Updater.kt` | GitHub release check, download to Downloads, signature check |
 | `NetCheck.kt` | Settings > Network check: connection, public address, and a step-by-step stream test |
 | `DeadStations.kt` | Stations that failed today on this connection, skipped by previous/next |
+| `UsbLibrary.kt`, `UsbPositions.kt` | USB sticks: folders, natural sort, episode names, `.nfo`, posters, subtitles; resume points and watched marks |
 | `AlbumArt.kt`, `ArtworkPlayer.kt` | iTunes cover lookup; adds the cover to the session's metadata without reloading the stream |
 
 `scripts/release.sh` (releases), `scripts/check_public_tree.py` (CI source check), `.github/workflows/` (checks and releases).
