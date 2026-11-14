@@ -60,5 +60,11 @@ fi
 echo "About to publish v$VERSION to $REPO with $OUT."
 read -r -p "Publish? [y/N] " OK
 [[ "$OK" == "y" || "$OK" == "Y" ]] || { echo "Not published. APK is in dist/."; exit 0; }
-gh release create "v$VERSION" "$OUT" --repo "$REPO" --title "MG4 Streams $VERSION" --notes-file "$NOTES_FILE"
+# Commit and push the version bump first, so the release tag points at it.
+if ! git diff --quiet -- "$GRADLE_FILE"; then
+  git commit -q -m "Bump version to $VERSION" -- "$GRADLE_FILE"
+fi
+git push -q origin HEAD
+gh release create "v$VERSION" "$OUT" --repo "$REPO" --target "$(git rev-parse HEAD)" \
+  --title "MG4 Streams $VERSION" --notes-file "$NOTES_FILE"
 echo "Published. The app's Check for update will find v$VERSION."
