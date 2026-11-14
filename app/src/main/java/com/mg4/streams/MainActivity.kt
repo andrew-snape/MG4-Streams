@@ -25,6 +25,7 @@ import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.annotation.OptIn
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
@@ -35,6 +36,7 @@ import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.Tracks
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import androidx.media3.ui.PlayerView
@@ -47,6 +49,7 @@ import java.util.Date
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executors
 
+@OptIn(UnstableApi::class)
 class MainActivity : ComponentActivity() {
 
     private lateinit var playerView: PlayerView

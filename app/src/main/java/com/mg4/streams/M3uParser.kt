@@ -49,7 +49,7 @@ object M3uParser {
             pendingReferrer = null
         }
 
-        text.removePrefix("﻿").lineSequence().map { it.trim() }.forEach { line ->
+        text.removePrefix("\uFEFF").lineSequence().map { it.trim() }.forEach { line ->
             when {
                 line.isEmpty() -> Unit
 

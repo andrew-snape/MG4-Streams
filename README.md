@@ -17,8 +17,8 @@ Unofficial. Not affiliated with MG or SAIC. Use at your own risk.
 - **Driving:** the full station grid, tabs, search and Settings work in any gear; only video needs P. Optional **Simple driving screen** (Settings): when not in P, six big presets (favourites, then recently played), larger text and buttons, and previous/next step through the presets. Swipe the logo to change station.
 - **Parked extras:** 640 × 360 video, group chips for TV, a programme progress bar, 3 or 5 column grid, Favs / Recent / All.
 - **Connection chip and Retry:** shows Car internet / Wi-Fi / Offline / Reconnecting; a Retry button after a failure, with a hint when a channel blocks the car's internet.
-- **Data use:** today and this month, by connection, in Settings.
-- **Arrange presets:** Settings > Arrange presets sets the order of favourites; the first six are the driving presets.
+- **Data use and Network check:** data used today and this month, by connection, in Settings. Network check tests the connection and the station on screen step by step (redirects, playlist, segments) and shows the HTTP codes.
+- **Arrange presets:** Settings > Arrange presets sets the order of favourites; the first six are the presets on the Simple driving screen.
 - **Skips dead stations:** a station that fails today on the current connection is greyed out and skipped by previous/next (screen and steering wheel). Tapping it still tries it. Playing it successfully clears it.
 - **Album art:** for songs ("Artist - Song" stream titles) the cover is looked up on Apple's iTunes Search and shown instead of the logo, and in the media notification. Only the song title is sent. Off switch in Settings.
 - **Remembers** the last station and resumes it on start (on by default; never TV). Night dim from 7 pm to 6 am.
@@ -30,7 +30,7 @@ Unofficial. Not affiliated with MG or SAIC. Use at your own risk.
 
 ## Playlists
 
-Open Settings (car in P), choose **Radio**, **TV** or **My list**, then:
+Open Settings, choose **Radio**, **TV** or **My list**, then:
 
 - **Add URL:** downloads the playlist into that tab and saves the address for updates.
 - **Import file:** loads an `.m3u`/`.m3u8` file into that tab.
@@ -61,8 +61,12 @@ Formats: whatever the head unit's Android decoders handle. H.264 and AAC play. A
 Requirements: JDK 17, Android SDK (compileSdk 34). Create `local.properties` with `sdk.dir=/path/to/Android/sdk`, then run:
 
 ```sh
-./gradlew assembleDebug testDebugUnitTest
+./gradlew testDebugUnitTest lintDebug assembleRelease
 ```
+
+The release build uses R8 (`isMinifyEnabled`, `isShrinkResources`) to remove unused code from Media3, Guava and Kotlin, and unused resources: about 2.7 MB instead of 14 MB for the debug build. It comes out unsigned (`app/build/outputs/apk/release/app-release-unsigned.apk`) and is signed with the platform key afterwards.
+
+GitHub Actions runs the same checks on every push to `main` and on pull requests (`.github/workflows/android.yml`), plus `scripts/check_public_tree.py`, which fails if a key file, an APK or an iCloud duplicate (`name 2.kt`) is committed.
 
 ## Sign and install
 
@@ -70,8 +74,8 @@ The app is installed and tested signed with the head unit's platform key (`platf
 
 ```sh
 apksigner sign --key platform.pk8 --cert platform.x509.pem \
-  --out MG4Streams-platform.apk app/build/outputs/apk/debug/app-debug.apk
-apksigner verify --print-certs MG4Streams-platform.apk
+  --out MG4Streams-platform.apk app/build/outputs/apk/release/app-release-unsigned.apk
+apksigner verify --print-certs MG4Streams-platform.apk   # SHA-256 must be c8a2e9bc…92ab8
 ```
 
 Install over ADB. `adb install` is refused, so push the APK and install it with `pm`:
@@ -81,7 +85,7 @@ adb push MG4Streams-platform.apk /data/local/tmp/
 adb shell pm install -r -f -d -t /data/local/tmp/MG4Streams-platform.apk
 ```
 
-Updates must be signed with the same key.
+Updates must be signed with the same key. After the first install, use the in-app updater (below).
 
 ## App updates
 
@@ -93,14 +97,27 @@ Before opening Downloads, the app checks that the file is the same app, has a hi
 
 ### Publishing a release
 
+Releases are built, signed and published by GitHub Actions (`.github/workflows/release.yml`) when a `v*` tag is pushed:
+
 ```sh
-scripts/release.sh 0.5.0                 # bump, test, build (R8, ~2.7 MB), platform-sign, check cert, ask, publish
-scripts/release.sh 0.5.0 --no-publish    # stop after dist/MG4Streams-0.5.0-platform.apk
+scripts/release.sh 0.5.2 "What changed"
 ```
 
-The script expects the platform key in `~/Documents/GitHub/DiPlay-MG4/tools` and refuses to continue if the signing certificate isn't the one the head unit has. Release notes come from `dist/notes-<version>.md`, or one line typed at the prompt. It asks before running `gh release create`.
+The script checks you're on an up-to-date `main` with nothing uncommitted, bumps `versionName` and `versionCode`, runs the tests and lint, then asks before it commits `Release 0.5.2`, tags `v0.5.2` (the tag message becomes the release notes) and pushes both. The workflow checks the tag matches `versionName`, builds the release APK, signs it with the platform key from the repository secrets, refuses any certificate other than the head unit's, and publishes `MG4Streams-0.5.2-platform.apk`. Follow it with `gh run watch` or in the Actions tab. It can also be started by hand from the Actions tab (Release > Run workflow, with the tag).
 
-The release build uses R8 (`isMinifyEnabled`, `isShrinkResources`): unused code from Media3, Guava and Kotlin, and unused resources, are removed. 14 MB debug, about 2.7 MB release.
+Repository secrets (Settings > Secrets and variables > Actions), the same ones DiPlay-MG4 uses:
+
+| Secret | Value |
+|---|---|
+| `MG4_PLATFORM_PK8_BASE64` | `base64 < platform.pk8` |
+| `MG4_PLATFORM_CERT_BASE64` | `base64 < platform.x509.pem` |
+
+To build and publish from a Mac instead (platform key in `~/Documents/GitHub/DiPlay-MG4/tools`):
+
+```sh
+scripts/release.sh 0.5.2 "What changed" --local               # build, sign, check, publish with gh
+scripts/release.sh 0.5.2 --local --no-publish                 # only dist/MG4Streams-0.5.2-platform.apk
+```
 
 ## Code layout
 
@@ -119,6 +136,10 @@ The release build uses R8 (`isMinifyEnabled`, `isShrinkResources`): unused code 
 | `DataUsage.kt`, `Net.kt` | Data-use counter by connection; connection type |
 | `Updater.kt` | GitHub release check, download to Downloads, signature check |
 | `NetCheck.kt` | Settings > Network check: connection, public address, and a step-by-step stream test |
+| `DeadStations.kt` | Stations that failed today on this connection, skipped by previous/next |
+| `AlbumArt.kt`, `ArtworkPlayer.kt` | iTunes cover lookup; adds the cover to the session's metadata without reloading the stream |
+
+`scripts/release.sh` (releases), `scripts/check_public_tree.py` (CI source check), `.github/workflows/` (checks and releases).
 
 ## Licence
 

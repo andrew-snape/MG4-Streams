@@ -26,7 +26,7 @@ object UrlListParser {
         val result = LinkedHashMap<Tab, MutableList<String>>()
         // Null under an unknown [header]: its addresses are skipped, not put in another tab.
         var section: Tab? = defaultSlot
-        text.removePrefix("﻿").lineSequence().map { it.trim() }.forEach { line ->
+        text.removePrefix("\uFEFF").lineSequence().map { it.trim() }.forEach { line ->
             if (line.isEmpty() || line.startsWith("#") || line.startsWith("//")) return@forEach
             HEADER.matchEntire(line)?.let { match ->
                 section = slotFor(match.groupValues[1])
