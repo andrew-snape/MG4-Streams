@@ -11,6 +11,10 @@ on:
       tag:
         description: 'Tag to release (e.g. v0.5.2). Must match versionName; created on the chosen branch if missing.'
         required: true
+      dry_run:
+        description: 'Dry run: build, sign and check, keep the APK as a workflow artifact, publish nothing.'
+        type: boolean
+        default: false
 permissions:
   contents: write
 concurrency:
@@ -27,7 +31,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          elif gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "Release $TAG already exists; nothing to do."
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
@@ -48,7 +54,7 @@ jobs:
           ref: ${{ github.event_name == 'push' && github.ref || github.sha }}
           fetch-depth: 0
       - name: Check an existing tag points at this commit
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'workflow_dispatch' && !inputs.dry_run
         run: |
           if git rev-parse -q --verify "refs/tags/$TAG^{commit}" >/dev/null; then
             tagged=$(git rev-parse "refs/tags/$TAG^{commit}")
@@ -113,7 +119,14 @@ jobs:
       - name: Remove keys
         if: always()
         run: rm -rf "$RUNNER_TEMP/keys"
+      - name: Keep the APK (dry run)
+        if: inputs.dry_run
+        uses: actions/upload-artifact@v7
+        with:
+          name: MG4Streams-${{ env.VERSION }}-platform-dry-run
+          path: ${{ env.APK }}
       - name: Publish GitHub release
+        if: ${{ !inputs.dry_run }}
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ env.TAG }}
