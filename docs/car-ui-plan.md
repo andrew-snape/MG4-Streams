@@ -4,7 +4,7 @@ Written 2026-11-14, after the first car tests of v0.2.1. Screen: 1778 × 720 px 
 
 ## Status (v0.4.0, 2026-11-14)
 
-Built from this plan: driving mode (2.1), parked extras (2.2: 640 × 360 video, group chips, guide progress, 3/5 columns), connection chip, Retry and error hints, night dim, swipe, tap feedback (2.3), data use counter, auto-resume (on by default, never TV) and recently played (section 3). Next round (built, not yet tested in the car): smaller release APK (R8, 14 MB to 2.7 MB), `scripts/release.sh`, Arrange presets, skipping dead stations, and album art. Not done yet: sleep timer, steering-wheel long-press, USB backup.
+Built from this plan: driving mode (2.1), parked extras (2.2: 640 × 360 video, group chips, guide progress, 3/6 columns), connection chip, Retry and error hints, night dim, swipe, tap feedback (2.3), data use counter, auto-resume (on by default, never TV) and recently played (section 3). Next round (built, not yet tested in the car): smaller release APK (R8, 14 MB to 2.7 MB), `scripts/release.sh`, Arrange presets, skipping dead stations, and album art. Not done yet: sleep timer, steering-wheel long-press, USB backup.
 
 Launcher card and instrument cluster: there's no path for a third-party app. Both read only SAIC's own sources (radio, USB, Bluetooth, CarPlay/Android Auto bridge, and "online music", which is hard-wired to the Amazon Music app's service). Showing our station there would mean replacing the Amazon Music system app. Not done.
 
@@ -69,7 +69,7 @@ The screen simplifies when the gear isn't P, which the app already knows:
 
 Today's layout, with:
 - **Video panel larger**: 16:9 at 853 × 480 instead of 533 × 300, with the station text beside it.
-- **Grid density toggle**: 3 columns (big) or 5 columns (compact) for browsing 165 TV channels.
+- **Grid density toggle**: 3 columns (big) or 6 columns (compact, two-line names) for browsing 165 TV channels.
 - **Group chips** above the grid for TV (Melbourne, Regional, Sport, News…, from `group-title`).
 - **Guide strip** under the video for TV: now / next with a progress bar (data is already in `Epg.kt`).
 

@@ -684,8 +684,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun applyDensity() {
-        stationGrid.numColumns = if (compactGrid) 5 else 3
-        densityButton.text = if (compactGrid) "3×" else "5×"
+        stationGrid.numColumns = if (compactGrid) 6 else 3
+        densityButton.text = if (compactGrid) "3×" else "6×"
         adapter.notifyDataSetChanged()
     }
 
@@ -2024,16 +2024,16 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** 5 columns: smaller logo and one line of name, so tiles fit the card width. */
+    /** 6 columns: smaller logo and a two-line name (up to two lines so "S02E02 · Title" stays readable). */
     private fun sizeTile(tile: TileViews, view: View) {
         if (tile.compact == compactGrid) return
         tile.compact = compactGrid
-        val side = if (compactGrid) 64 else 110
+        val side = if (compactGrid) 56 else 110
         (tile.logo.parent as View).layoutParams = (tile.logo.parent as View).layoutParams.apply { width = side; height = side }
         tile.progress.layoutParams = tile.progress.layoutParams.apply { width = side }
-        tile.name.textSize = if (compactGrid) 14f else 17f
-        tile.name.setLines(if (compactGrid) 1 else 2)
-        view.setPadding(if (compactGrid) 4 else 10, 10, if (compactGrid) 4 else 10, 10)
+        tile.name.textSize = if (compactGrid) 12f else 17f
+        tile.name.setLines(2)
+        view.setPadding(if (compactGrid) 2 else 10, 10, if (compactGrid) 2 else 10, 10)
     }
 
     /** A grid tile's views, looked up once per tile instead of on every scroll or refresh. */
