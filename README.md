@@ -16,7 +16,7 @@ Unofficial. Not affiliated with MG or SAIC. Use at your own risk.
 - **Per-channel headers:** `#EXTVLCOPT:http-user-agent` / `http-referrer` and Kodi-style `URL|User-Agent=...` are sent on every request, including HLS segments.
 - **Reconnects by itself:** waits for the network at car start (for example before a phone hotspot connects), and retries dropped or expired streams.
 - **Driving:** the full station grid, tabs, search and Settings work in any gear; only video needs P. Optional **Simple driving screen** (Settings): when not in P, six big presets (favourites, then recently played), larger text and buttons, and previous/next step through the presets. Swipe the logo to change station.
-- **Parked extras:** 640 × 360 video, group chips for TV, a programme progress bar, 3 or 5 column grid, Favs / Recent / All.
+- **Parked extras:** 640 × 360 video, group chips for TV, a programme progress bar, 3 or 6 column grid, Favs / Recent / All.
 - **Connection chip and Retry:** shows Car internet / Wi-Fi / Offline / Reconnecting; a Retry button after a failure, with a hint when a channel blocks the car's internet.
 - **Data use and Network check:** data used today and this month, by connection, in Settings. Network check tests the connection and the station on screen step by step (redirects, playlist, segments) and shows the HTTP codes.
 - **Arrange presets:** Settings > Arrange presets sets the order of favourites; the first six are the presets on the Simple driving screen.

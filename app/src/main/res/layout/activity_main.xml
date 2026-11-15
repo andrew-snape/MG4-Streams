@@ -340,7 +340,7 @@
                         android:layout_width="88dp"
                         android:layout_marginEnd="0dp"
                         android:contentDescription="Grid size"
-                        android:text="5×"
+                        android:text="6×"
                         android:textSize="22sp" />
                 </LinearLayout>
 
