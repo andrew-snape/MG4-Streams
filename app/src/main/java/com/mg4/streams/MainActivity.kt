@@ -327,6 +327,9 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+        hideSystemBars()
+        @Suppress("DEPRECATION")
+        window.decorView.setOnSystemUiVisibilityChangeListener { hideSystemBars() }
         onBackPressedDispatcher.addCallback(this, backCallback)
 
         prefs = getSharedPreferences("mg4_streams", Context.MODE_PRIVATE)
@@ -501,6 +504,22 @@ class MainActivity : ComponentActivity() {
     private fun pruneFiles(dir: File, keep: Int) {
         val files = dir.listFiles()?.sortedByDescending { it.lastModified() } ?: return
         files.drop(keep).forEach { it.delete() }
+    }
+
+    /** Hides the head unit's side dock and status bar. Re-applied on focus and on system-bar changes. */
+    @Suppress("DEPRECATION")
+    private fun hideSystemBars() {
+        window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
+            View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
+            View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+            View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+            View.SYSTEM_UI_FLAG_FULLSCREEN or
+            View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) hideSystemBars()
     }
 
     override fun onResume() {
