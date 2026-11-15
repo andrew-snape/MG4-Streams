@@ -261,7 +261,7 @@ class MainActivity : ComponentActivity() {
         }
     private var usbPermissionAsked = false
 
-    /** Storage permission puts the update in the public Downloads folder; without it, the app's own. */
+    /** Storage permission is needed to save the update in the public Downloads folder. */
     private val storagePermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { _ ->
             pendingRelease?.let { release ->

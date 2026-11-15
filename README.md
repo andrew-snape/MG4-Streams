@@ -109,7 +109,7 @@ Updates must be signed with the same key. After the first install, use the in-ap
 
 Settings > **Check for app updates** looks at the latest release of this repo (set in `app/build.gradle.kts` as `UPDATE_REPO`; change it in a fork). The app also checks quietly once a day and shows a message when there's a new version.
 
-The head unit refuses installs started by the app itself ("not a system app"), so the app downloads the APK with DownloadManager into **Downloads** (`MG4Streams-<version>.apk`), checks it, then opens Downloads. Tap the file and choose Install. The first time, the app asks for storage permission so the file goes in the public Downloads folder; without it, the file goes in the app's own folder (whether the Downloads screen lists it there is still to check on the car).
+The head unit refuses installs started by the app itself ("not a system app"), so the app downloads the APK with DownloadManager into **Downloads** (`MG4Streams-<version>.apk`), checks it, then opens Downloads. Tap the file and choose Install. The first time, the app asks for storage permission so the file goes in the public Downloads folder. Without it the update stops with a message: a file in the app's own folder is listed in Downloads on the car but can't be opened from there.
 
 Before opening Downloads, the app checks that the file is the same app, has a higher `versionCode`, and is **signed with the same key** as the installed copy. A file that fails is deleted.
 

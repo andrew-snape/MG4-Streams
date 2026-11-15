@@ -8,7 +8,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <!-- In-app updater: the APK is downloaded into the public Downloads folder and the user
          installs it from there with Android's installer. The head unit refuses installs the
-         app starts itself. Without this permission the APK goes in the app's own folder. -->
+         app starts itself. Without this permission the update is not downloaded. -->
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
 

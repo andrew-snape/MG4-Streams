@@ -70,21 +70,16 @@ class Updater(private val context: Context) {
 
     /**
      * Downloads the release APK with DownloadManager and waits for it. Goes to the public
-     * Downloads folder when the app has storage permission, otherwise to the app's own folder
-     * (still listed in Downloads). [progress] gets 0-100, or -1 if unknown.
+     * Downloads folder, which needs storage permission: the app's own folder is listed in
+     * Downloads on the head unit but the file can't be opened from there. [progress] gets 0-100, or -1 if unknown.
      * If this thread is interrupted, the download carries on in DownloadManager.
      */
     fun download(release: Release, progress: (Int) -> Unit): Download {
         val name = fileName(release.tag)
         val public = context.checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) ==
             PackageManager.PERMISSION_GRANTED
-        val dir = if (public) {
-            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-        } else {
-            context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
-                ?: throw IllegalStateException("no storage for the download")
-        }
-        dir.mkdirs()
+        if (!public) throw IllegalStateException("storage permission is needed to save it in Downloads")
+        Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS).mkdirs()
         removeOldDownloads()
         val request = DownloadManager.Request(Uri.parse(release.apkUrl))
             .setTitle("$TITLE_PREFIX${release.tag}")
@@ -92,8 +87,7 @@ class Updater(private val context: Context) {
             .setMimeType(APK_MIME)
             .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
             .addRequestHeader("User-Agent", "MG4Streams-updater")
-        if (public) request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, name)
-        else request.setDestinationInExternalFilesDir(context, Environment.DIRECTORY_DOWNLOADS, name)
+        request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, name)
         val id = downloads.enqueue(request)
 
         val started = System.currentTimeMillis()
