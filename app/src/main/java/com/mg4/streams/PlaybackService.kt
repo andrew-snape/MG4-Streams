@@ -7,6 +7,7 @@ import android.net.NetworkCapabilities
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
@@ -18,6 +19,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.HttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
+import androidx.media3.exoplayer.upstream.DefaultBandwidthMeter
 import androidx.media3.exoplayer.Renderer
 import androidx.media3.exoplayer.audio.AudioRendererEventListener
 import androidx.media3.exoplayer.audio.AudioSink
@@ -69,6 +71,11 @@ class PlaybackService : MediaSessionService() {
         retryNow()
     }
 
+    // ---- Stream first (see [NetGate]) ----
+    /** When the current stream last became READY without stalling since (elapsed realtime), or 0. */
+    private var readySince = 0L
+    private val settleRunnable = Runnable { updateGate() }
+
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) = onNetworkMaybeUp()
         override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) = onNetworkMaybeUp()
@@ -99,8 +106,8 @@ class PlaybackService : MediaSessionService() {
 
     // ---- Album art ----
     private val artExecutor = Executors.newSingleThreadExecutor()
-    /** The stream title the art was last looked up for. */
-    private var artTitle: String? = null
+    /** The stream title the art was last looked up for. Read on [artExecutor] too. */
+    @Volatile private var artTitle: String? = null
 
     private val retryListener = object : Player.Listener {
         override fun onPlayerError(error: PlaybackException) = handleError(error)
@@ -120,6 +127,7 @@ class PlaybackService : MediaSessionService() {
                 Player.STATE_IDLE -> if (player.playerError == null) resetRetries(clearStatus = true)
                 else -> Unit
             }
+            updateGate()
         }
 
         override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
@@ -127,6 +135,7 @@ class PlaybackService : MediaSessionService() {
                 resetRetries(clearStatus = true)
                 saveUsbPosition()
             }
+            updateGate()
         }
 
         override fun onPositionDiscontinuity(old: Player.PositionInfo, new: Player.PositionInfo, reason: Int) {
@@ -148,6 +157,9 @@ class PlaybackService : MediaSessionService() {
             sessionPlayer.setArtwork(null)
             onUsbItem(mediaItem)
             if (fileOf(mediaItem) == null) onStationChanged(reason)
+            // A new station starts from scratch: hold background downloads until it settles.
+            readySince = 0L
+            updateGate()
         }
 
         override fun onMediaMetadataChanged(mediaMetadata: MediaMetadata) = maybeLookUpArt(mediaMetadata)
@@ -204,18 +216,26 @@ class PlaybackService : MediaSessionService() {
             .setUsage(C.USAGE_MEDIA)
             .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
             .build()
-        // Start playing after 1 s of buffered audio instead of ExoPlayer's default 2.5 s, so a
-        // station starts sooner. After a stall, wait 2 s so it doesn't stutter on weak signal.
+        // Start playing after 3 s of buffered audio. 1 s started sooner but stalled straight
+        // away on the car's slow connection (a couple of Mbit/s). After a stall, wait 4 s.
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
                 /* minBufferMs = */ 15_000,
                 /* maxBufferMs = */ 50_000,
-                /* bufferForPlaybackMs = */ 1_000,
-                /* bufferForPlaybackAfterRebufferMs = */ 2_000,
+                /* bufferForPlaybackMs = */ 3_000,
+                /* bufferForPlaybackAfterRebufferMs = */ 4_000,
             )
             .build()
+        // ExoPlayer's first guess of the speed comes from the country, and Australia's is far
+        // above the car's connection, so TV in P opened on a 720p variant and stalled. Start the
+        // guess at 1 Mbit/s: TV opens on a small variant and steps up if the link allows.
+        val bandwidthMeter = DefaultBandwidthMeter.Builder(this)
+            .setInitialBitrateEstimate(INITIAL_BITRATE_ESTIMATE)
+            .build()
+        NetGate.bandwidthEstimate = { bandwidthMeter.bitrateEstimate }
         player = ExoPlayer.Builder(this, FfmpegRenderersFactory(this))
             .setMediaSourceFactory(StreamMediaSourceFactory(this))
+            .setBandwidthMeter(bandwidthMeter)
             .setLoadControl(loadControl)
             .setAudioAttributes(audioAttributes, /* handleAudioFocus = */ true)
             .setHandleAudioBecomingNoisy(true)
@@ -242,6 +262,8 @@ class PlaybackService : MediaSessionService() {
         handler.removeCallbacksAndMessages(null)
         artExecutor.shutdownNow()
         usbExecutor.shutdown()
+        NetGate.setStreamBusy(false)
+        NetGate.bandwidthEstimate = { 0L }
         runCatching { DataUsage.sample(this) }
         runCatching { connectivity.unregisterNetworkCallback(networkCallback) }
         session?.let { mediaSession ->
@@ -254,6 +276,11 @@ class PlaybackService : MediaSessionService() {
     }
 
     private fun handleError(error: PlaybackException) {
+        handleErrorInner(error)
+        updateGate()
+    }
+
+    private fun handleErrorInner(error: PlaybackException) {
         val reason = describe(error)
         handler.removeCallbacks(retryRunnable)
         networkRetryQueued = false
@@ -438,10 +465,49 @@ class PlaybackService : MediaSessionService() {
         val mediaId = item.mediaId
         runCatching {
             artExecutor.execute {
+                // Waits behind the station (see NetGate); the song may have changed meanwhile.
+                if (artTitle != title) return@execute
                 val art = AlbumArt.lookup(title)
                 handler.post {
                     if (artTitle == title && player.currentMediaItem?.mediaId == mediaId) sessionPlayer.setArtwork(art)
                 }
+            }
+        }
+    }
+
+    /**
+     * Tells [NetGate] whether background downloads should wait: yes while a stream is starting,
+     * rebuffering or being retried, and for [NetGate.SETTLE_MS] after it starts playing. No when
+     * stopped, playing a USB file, or after giving up.
+     */
+    private fun updateGate() {
+        handler.removeCallbacks(settleRunnable)
+        val item = player.currentMediaItem
+        if (!player.playWhenReady || item == null || fileOf(item) != null) {
+            readySince = 0L
+            NetGate.setStreamBusy(false)
+            return
+        }
+        when (player.playbackState) {
+            Player.STATE_READY -> {
+                val now = SystemClock.elapsedRealtime()
+                if (readySince == 0L) readySince = now
+                val left = NetGate.SETTLE_MS - (now - readySince)
+                if (left > 0) {
+                    NetGate.setStreamBusy(true)
+                    handler.postDelayed(settleRunnable, left)
+                } else {
+                    NetGate.setStreamBusy(false)
+                }
+            }
+            Player.STATE_BUFFERING -> {
+                readySince = 0L
+                NetGate.setStreamBusy(true)
+            }
+            else -> {
+                // Idle after an error: busy while a retry is coming, free once it has given up.
+                readySince = 0L
+                NetGate.setStreamBusy(player.playerError != null && (attempts > 0 || waitingForNetwork))
             }
         }
     }
@@ -558,6 +624,8 @@ class PlaybackService : MediaSessionService() {
         private val RETRY_DELAYS_MS = longArrayOf(1_000, 2_000, 4_000, 8_000, 15_000, 15_000)
         private const val NETWORK_POLL_MS = 15_000L
         private const val MAX_NETWORK_WAIT_MS = 5 * 60_000L
+        /** First guess of the connection speed, bit/s (see onCreate). */
+        private const val INITIAL_BITRATE_ESTIMATE = 1_000_000L
         private const val DROP_DELAY_MS = 10_000L
         private const val DATA_SAMPLE_MS = 30_000L
     }

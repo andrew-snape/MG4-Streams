@@ -25,6 +25,13 @@ class LogoLoader(
     private val dir: File,
     private val executor: ExecutorService,
     private val ui: Handler,
+    /**
+     * Where new logos are downloaded, one at a time, so a download waiting behind a starting
+     * station (see [NetGate]) doesn't hold up logos already on disk. Null: on [executor].
+     */
+    private val downloads: ExecutorService? = null,
+    /** Names this loader's downloads in Network check. */
+    private val netLabel: String = "Logo",
 ) {
     private val memory = object : LruCache<String, Bitmap>(12 * 1024 * 1024) {
         override fun sizeOf(key: String, value: Bitmap) = value.byteCount
@@ -62,15 +69,15 @@ class LogoLoader(
         inFlight[url] = mutableListOf(view)
         try {
             executor.execute {
-                val bitmap = runCatching { fetch(url) }.getOrNull()
-                ui.post {
-                    val waiting = inFlight.remove(url).orEmpty()
-                    if (bitmap == null) {
-                        failedAt[url] = SystemClock.elapsedRealtime()
-                    } else {
-                        memory.put(url, bitmap)
-                        waiting.forEach { if (it.tag == url) it.setImageBitmap(bitmap) }
+                val queue = downloads
+                if (queue != null && isHttp(url) && !File(dir, sha1(url)).exists()) {
+                    try {
+                        queue.execute { finish(url, runCatching { fetch(url) }.getOrNull()) }
+                    } catch (_: RejectedExecutionException) {
+                        finish(url, null)
                     }
+                } else {
+                    finish(url, runCatching { fetch(url) }.getOrNull())
                 }
             }
         } catch (_: RejectedExecutionException) {
@@ -78,11 +85,26 @@ class LogoLoader(
         }
     }
 
+    private fun finish(url: String, bitmap: Bitmap?) {
+        ui.post {
+            val waiting = inFlight.remove(url).orEmpty()
+            if (bitmap == null) {
+                failedAt[url] = SystemClock.elapsedRealtime()
+            } else {
+                memory.put(url, bitmap)
+                waiting.forEach { if (it.tag == url) it.setImageBitmap(bitmap) }
+            }
+        }
+    }
+
+    private fun isHttp(address: String) =
+        address.startsWith("http://", true) || address.startsWith("https://", true)
+
     private fun fetch(address: String): Bitmap? {
         val file = when {
             address.startsWith("file://") -> File(address.removePrefix("file://")).takeIf { it.isFile } ?: return null
             address.startsWith("frame://") -> frameFile(File(address.removePrefix("frame://"))) ?: return null
-            address.startsWith("http://", true) || address.startsWith("https://", true) -> download(address) ?: return null
+            isHttp(address) -> download(address) ?: return null
             else -> return null
         }
         return decode(file, deleteIfBad = !address.startsWith("file://"))
@@ -138,33 +160,36 @@ class LogoLoader(
     private fun download(address: String): File? {
         dir.mkdirs()
         val file = File(dir, sha1(address))
-        if (!file.exists()) {
-            val connection = URL(address).openConnection() as HttpURLConnection
-            connection.connectTimeout = 8_000
-            connection.readTimeout = 10_000
-            val temp = File.createTempFile(file.name, ".tmp", dir)
-            try {
-                if (connection.responseCode != 200) return null
-                connection.inputStream.use { input ->
-                    temp.outputStream().use { out ->
-                        val buf = ByteArray(8192)
-                        var total = 0
-                        while (true) {
-                            val n = input.read(buf)
-                            if (n < 0) break
-                            total += n
-                            if (total > MAX_BYTES) return null
-                            out.write(buf, 0, n)
-                        }
+        // Only new logos touch the network, and they wait while a station is starting.
+        if (!file.exists()) NetGate.background(netLabel) { downloadTo(address, file) }
+        return file.takeIf { it.exists() }
+    }
+
+    private fun downloadTo(address: String, file: File) {
+        val connection = URL(address).openConnection() as HttpURLConnection
+        connection.connectTimeout = 8_000
+        connection.readTimeout = 10_000
+        val temp = File.createTempFile(file.name, ".tmp", dir)
+        try {
+            if (connection.responseCode != 200) return
+            connection.inputStream.use { input ->
+                temp.outputStream().use { out ->
+                    val buf = ByteArray(8192)
+                    var total = 0
+                    while (true) {
+                        val n = input.read(buf)
+                        if (n < 0) break
+                        total += n
+                        if (total > MAX_BYTES) return
+                        out.write(buf, 0, n)
                     }
                 }
-                if (!temp.renameTo(file) && !file.exists()) return null
-            } finally {
-                connection.disconnect()
-                temp.delete()
             }
+            temp.renameTo(file)
+        } finally {
+            connection.disconnect()
+            temp.delete()
         }
-        return file
     }
 
     private fun decode(file: File, deleteIfBad: Boolean): Bitmap? {

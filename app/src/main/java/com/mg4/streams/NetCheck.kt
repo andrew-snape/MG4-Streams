@@ -22,6 +22,10 @@ object NetCheck {
         val out = StringBuilder()
         out.appendLine("Connection: ${describeNetwork(context)}")
         out.appendLine("Public address: ${publicAddress()}")
+        out.appendLine("Download speed: ${speedTest()}")
+        val estimate = NetGate.bandwidthEstimate()
+        if (estimate > 0) out.appendLine("Player's speed estimate: ${estimate / 1000} kbit/s")
+        out.appendLine(NetGate.describe())
         if (channel == null) {
             out.appendLine()
             out.appendLine("Pick a station first to test its stream.")
@@ -63,6 +67,51 @@ object NetCheck {
         }.toMap()
         "${fields["ip"] ?: "?"}, country ${fields["loc"] ?: "?"}"
     }.getOrElse { "unknown (${describe(it)})" }
+
+    /**
+     * Downloads up to [SPEED_TEST_BYTES] from Cloudflare's speed test (no account; nothing about
+     * the car is sent) for at most [SPEED_TEST_MS], and says what that is enough for. While a
+     * station plays, it measures what's left over beside it.
+     */
+    private fun speedTest(): String = runCatching {
+        val url = URL("https://speed.cloudflare.com/__down?bytes=$SPEED_TEST_BYTES")
+        val c = url.openConnection() as HttpURLConnection
+        c.connectTimeout = 10_000
+        c.readTimeout = 10_000
+        c.setRequestProperty("User-Agent", "MG4Streams")
+        try {
+            if (c.responseCode != 200) return@runCatching "test server said HTTP ${c.responseCode}"
+            var total = 0L
+            var start = 0L
+            c.inputStream.use { input ->
+                val chunk = ByteArray(16 * 1024)
+                while (true) {
+                    val n = input.read(chunk)
+                    if (n < 0) break
+                    // Time from the first bytes, so connection set-up doesn't count.
+                    if (start == 0L) start = System.currentTimeMillis()
+                    total += n
+                    if (System.currentTimeMillis() - start > SPEED_TEST_MS) break
+                }
+            }
+            val ms = (System.currentTimeMillis() - start).coerceAtLeast(1)
+            val kbps = total * 8 / ms
+            "$kbps kbit/s (${total / 1024} KB in $ms ms). ${speedVerdict(kbps)}"
+        } finally {
+            c.disconnect()
+        }
+    }.getOrElse { "failed (${describe(it)})" }
+
+    /** What [kbps] is enough for, in the car. */
+    internal fun speedVerdict(kbps: Long): String = when {
+        kbps < 200 -> "Too slow for most streams."
+        kbps < 1000 -> "Enough for radio; TV will stall."
+        kbps < 2500 -> "Enough for radio and low-quality TV."
+        else -> "Enough for radio and TV."
+    }
+
+    private const val SPEED_TEST_BYTES = 1_000_000
+    private const val SPEED_TEST_MS = 8_000L
 
     private fun testStream(channel: Channel, out: StringBuilder) {
         var url = URL(channel.url)
