@@ -18,7 +18,8 @@ object AlbumArt {
     fun lookup(title: String): Uri? {
         val term = searchTerm(title) ?: return null
         synchronized(cache) { cache.get(term) }?.let { return it.ifEmpty { null }?.let(Uri::parse) }
-        val found = runCatching { fetch(term) }.getOrElse { return null } // network error: try again later
+        // Waits while a station is starting (see NetGate). Network error: try again later.
+        val found = runCatching { NetGate.background("Album art") { fetch(term) } }.getOrElse { return null }
         synchronized(cache) { cache.put(term, found.orEmpty()) }
         return found?.let(Uri::parse)
     }

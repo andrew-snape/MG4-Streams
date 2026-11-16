@@ -101,6 +101,10 @@ class MainActivity : ComponentActivity() {
     private val guideThread = Executors.newSingleThreadExecutor()
     /** Logo downloads and decoding. */
     private val logoThreads = Executors.newFixedThreadPool(3)
+    /** New logo and cover downloads, one at a time and behind a starting station (NetGate). */
+    private val logoDownloads = Executors.newSingleThreadExecutor()
+    /** The automatic playlist refresh at start, which waits behind a starting station. */
+    private val quietRefreshThread = Executors.newSingleThreadExecutor()
     private val handler = Handler(Looper.getMainLooper())
     private lateinit var logoLoader: LogoLoader
     private lateinit var prefs: android.content.SharedPreferences
@@ -340,9 +344,9 @@ class MainActivity : ComponentActivity() {
         )
         epgStore = EpgStore(File(filesDir, "epg.tsv"))
         favStore = FavouritesStore(File(filesDir, "favourites.txt"))
-        logoLoader = LogoLoader(File(filesDir, "logos"), logoThreads, handler)
+        logoLoader = LogoLoader(File(filesDir, "logos"), logoThreads, handler, logoDownloads, "Logo")
         val artDir = File(cacheDir, "art")
-        artLoader = LogoLoader(artDir, logoThreads, handler)
+        artLoader = LogoLoader(artDir, logoThreads, handler, logoDownloads, "Cover")
         worker.execute { pruneArt(artDir) }
         val thumbDir = File(cacheDir, "usbthumbs")
         usbLoader = LogoLoader(thumbDir, usbThumbThread, handler)
@@ -468,6 +472,11 @@ class MainActivity : ComponentActivity() {
 
         updateParkedUi()
         gearGate.connect(this)
+        // The last station is about to resume: keep the guide, playlists and logos off the
+        // connection until it has settled (see NetGate).
+        if (prefs.getBoolean(PREF_AUTO_RESUME, true) && prefs.getString(PREF_LAST_URL, null) != null) {
+            NetGate.expectStream()
+        }
         loadFavourites()
         loadPlaylists()
         updateStatus()
@@ -563,6 +572,8 @@ class MainActivity : ComponentActivity() {
         guideThread.shutdownNow()
         updateThread.shutdownNow()
         logoThreads.shutdownNow()
+        logoDownloads.shutdownNow()
+        quietRefreshThread.shutdownNow()
         super.onDestroy()
     }
 
@@ -919,12 +930,16 @@ class MainActivity : ComponentActivity() {
             message = "Updating playlists..."
             updateStatus()
         }
-        worker.execute {
+        // The automatic refresh waits behind a starting station (see NetGate), on its own thread
+        // so favourites and imports on the worker don't wait with it. Asked for: straight away.
+        val thread = if (quiet) quietRefreshThread else worker
+        thread.execute {
             val failed = mutableListOf<String>()
             for ((slot, urls) in jobs) {
                 try {
                     // All of a slot's addresses, or none: a failure keeps the saved list.
-                    saveAtomically(slotFiles.getValue(slot), fetchAll(urls))
+                    val text = if (quiet) NetGate.background("Playlist") { fetchAll(urls) } else fetchAll(urls)
+                    saveAtomically(slotFiles.getValue(slot), text)
                 } catch (e: Exception) {
                     failed += "${slot.label}: ${e.message}"
                 }
@@ -981,7 +996,8 @@ class MainActivity : ComponentActivity() {
             var current = if (cached.isEmpty) epgStore.loadCache() else cached
             runOnUiThread { if (!isDestroyed) applyGuide(current) }
             if (force || epgStore.needsRefresh(current, urls, ids)) {
-                runCatching { epgStore.refresh(urls, ids) }
+                // Often several MB: waits until the station has settled (see NetGate).
+                runCatching { NetGate.background("TV guide") { epgStore.refresh(urls, ids) } }
                     .onSuccess { current = it }
                     .onFailure { android.util.Log.w("MG4Streams", "guide download failed", it) }
             }
@@ -1267,7 +1283,9 @@ class MainActivity : ComponentActivity() {
             updateStatus()
         }
         updateThread.execute {
-            val result = runCatching { updater.latest() }
+            val result = runCatching {
+                if (userAsked) updater.latest() else NetGate.background("Update check") { updater.latest() }
+            }
             runOnUiThread {
                 updateRunning = false
                 if (isDestroyed) return@runOnUiThread
@@ -1444,6 +1462,7 @@ class MainActivity : ComponentActivity() {
         message = null
         prefs.edit().putString(PREF_LAST_URL, channel.url).apply()
         addRecent(channel.url)
+        if (channel.url.startsWith("http", ignoreCase = true)) NetGate.expectStream()
         player.repeatMode = Player.REPEAT_MODE_ALL
         player.setMediaItems(source.map { mediaItemFor(it) }, index, C.TIME_UNSET)
         player.prepare()

@@ -57,8 +57,9 @@ class StreamMediaSourceFactory(private val context: Context) : MediaSource.Facto
 
         val http = DefaultHttpDataSource.Factory()
             .setAllowCrossProtocolRedirects(true)
-            .setConnectTimeoutMs(10_000)
-            .setReadTimeoutMs(15_000)
+            // Generous: on the car's slow connection a busy moment shouldn't end the stream.
+            .setConnectTimeoutMs(CONNECT_TIMEOUT_MS)
+            .setReadTimeoutMs(READ_TIMEOUT_MS)
         agent?.let { http.setUserAgent(it) }
         referrer?.let { http.setDefaultRequestProperties(mapOf("Referer" to it)) }
         val dataSource = DefaultDataSource.Factory(context, http)
@@ -84,6 +85,8 @@ class StreamMediaSourceFactory(private val context: Context) : MediaSource.Facto
         const val EXTRA_USER_AGENT = "mg4.userAgent"
         const val EXTRA_REFERRER = "mg4.referrer"
         const val EXTRA_TVG_ID = "mg4.tvgId"
+        const val CONNECT_TIMEOUT_MS = 15_000
+        const val READ_TIMEOUT_MS = 20_000
     }
 }
 
