@@ -21,7 +21,14 @@ object NetCheck {
     fun run(context: Context, channel: Channel?): String {
         val out = StringBuilder()
         out.appendLine("Connection: ${describeNetwork(context)}")
-        out.appendLine("Public address: ${publicAddress()}")
+        val (address, country) = publicAddress()
+        out.appendLine("Public address: $address")
+        if (country != null && country != "AU") {
+            out.appendLine(
+                "  The internet sees this connection as outside Australia ($country). Australian " +
+                    "stations and TV (StreamTheWorld, Seven) can refuse it: use a hotspot or a relay."
+            )
+        }
         out.appendLine("Download speed: ${speedTest()}")
         val estimate = NetGate.bandwidthEstimate()
         if (estimate > 0) out.appendLine("Player's speed estimate: ${estimate / 1000} kbit/s")
@@ -33,8 +40,15 @@ object NetCheck {
         }
         out.appendLine()
         out.appendLine("Stream: ${channel.name}")
-        runCatching { testStream(channel, out) }
+        runCatching { testStream(channel, channel.url, out) }
             .onFailure { out.appendLine("  stopped: ${describe(it)}") }
+        // A numbered StreamTheWorld server: also try Triton's load balancer, which picks a server.
+        StreamTheWorld.redirectFor(channel.url)?.let { balanced ->
+            out.appendLine()
+            out.appendLine("Same station through StreamTheWorld's load balancer:")
+            runCatching { testStream(channel, balanced, out) }
+                .onFailure { out.appendLine("  stopped: ${describe(it)}") }
+        }
         return out.toString()
     }
 
@@ -59,14 +73,18 @@ object NetCheck {
             (if (dns.isNotEmpty()) ", DNS $dns" else "")
     }
 
-    /** Public IP and country from Cloudflare's trace page (no account, plain text). */
-    private fun publicAddress(): String = runCatching {
+    /**
+     * Public IP and country from Cloudflare's trace page (no account, plain text), as the text to
+     * show and the two-letter country (null if unknown).
+     */
+    private fun publicAddress(): Pair<String, String?> = runCatching {
         val text = get(URL("https://www.cloudflare.com/cdn-cgi/trace"), null, null, 4096).body
         val fields = text.lines().mapNotNull { line ->
             line.split('=', limit = 2).takeIf { it.size == 2 }?.let { it[0] to it[1] }
         }.toMap()
-        "${fields["ip"] ?: "?"}, country ${fields["loc"] ?: "?"}"
-    }.getOrElse { "unknown (${describe(it)})" }
+        val country = fields["loc"]?.takeIf { it.length == 2 }
+        "${fields["ip"] ?: "?"}, country ${country ?: "?"}" to country
+    }.getOrElse { "unknown (${describe(it)})" to null }
 
     /**
      * Downloads up to [SPEED_TEST_BYTES] from Cloudflare's speed test (no account; nothing about
@@ -113,9 +131,10 @@ object NetCheck {
     private const val SPEED_TEST_BYTES = 1_000_000
     private const val SPEED_TEST_MS = 8_000L
 
-    private fun testStream(channel: Channel, out: StringBuilder) {
-        var url = URL(channel.url)
+    private fun testStream(channel: Channel, address: String, out: StringBuilder) {
+        var url = URL(address)
         out.appendLine("  DNS ${url.host}: ${resolve(url.host)}")
+        out.appendLine("  DNS ${url.host} via Cloudflare 1.1.1.1: ${resolveDoh(url.host)}")
         // Follow redirects by hand so each hop shows.
         var response: Response? = null
         for (hop in 0 until 6) {
@@ -192,6 +211,31 @@ object NetCheck {
         val ms = System.currentTimeMillis() - start
         addresses.take(3).joinToString(", ") { it.hostAddress.orEmpty() } + " ($ms ms)"
     }.getOrElse { "failed (${describe(it)})" }
+
+    /**
+     * The same lookup through Cloudflare's DNS over HTTPS, bypassing the car modem's DNS. If it
+     * gives the same addresses as [resolve], DNS isn't why a station fails on this connection.
+     */
+    private fun resolveDoh(host: String): String = runCatching {
+        val start = System.currentTimeMillis()
+        val c = URL("https://cloudflare-dns.com/dns-query?name=$host&type=A").openConnection() as HttpURLConnection
+        c.connectTimeout = 10_000
+        c.readTimeout = 10_000
+        c.setRequestProperty("Accept", "application/dns-json")
+        val body = try {
+            if (c.responseCode != 200) return@runCatching "failed (HTTP ${c.responseCode})"
+            c.inputStream.use { it.readBytes().toString(Charsets.UTF_8) }
+        } finally {
+            c.disconnect()
+        }
+        val ms = System.currentTimeMillis() - start
+        dohAddresses(body).take(3).joinToString(", ").ifEmpty { "no addresses" } + " ($ms ms)"
+    }.getOrElse { "failed (${describe(it)})" }
+
+    /** IPv4 addresses (type 1 answers) in a DNS-over-HTTPS JSON reply. */
+    internal fun dohAddresses(json: String): List<String> =
+        Regex(""""type"\s*:\s*1\s*,[^}]*?"data"\s*:\s*"([0-9.]+)"""").findAll(json)
+            .map { it.groupValues[1] }.toList()
 
     private class Response(val code: Int, val location: String?, val body: String, val bytes: Long, val ms: Long)
 
