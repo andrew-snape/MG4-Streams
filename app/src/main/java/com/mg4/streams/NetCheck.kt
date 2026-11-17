@@ -21,7 +21,14 @@ object NetCheck {
     fun run(context: Context, channel: Channel?): String {
         val out = StringBuilder()
         out.appendLine("Connection: ${describeNetwork(context)}")
-        out.appendLine("Public address: ${publicAddress()}")
+        val (address, country) = publicAddress()
+        out.appendLine("Public address: $address")
+        if (country != null && country != "AU") {
+            out.appendLine(
+                "  The internet sees this connection as outside Australia ($country). Australian " +
+                    "stations and TV (StreamTheWorld, Seven) can refuse it: use a hotspot or a relay."
+            )
+        }
         out.appendLine("Download speed: ${speedTest()}")
         val estimate = NetGate.bandwidthEstimate()
         if (estimate > 0) out.appendLine("Player's speed estimate: ${estimate / 1000} kbit/s")
@@ -59,14 +66,18 @@ object NetCheck {
             (if (dns.isNotEmpty()) ", DNS $dns" else "")
     }
 
-    /** Public IP and country from Cloudflare's trace page (no account, plain text). */
-    private fun publicAddress(): String = runCatching {
+    /**
+     * Public IP and country from Cloudflare's trace page (no account, plain text), as the text to
+     * show and the two-letter country (null if unknown).
+     */
+    private fun publicAddress(): Pair<String, String?> = runCatching {
         val text = get(URL("https://www.cloudflare.com/cdn-cgi/trace"), null, null, 4096).body
         val fields = text.lines().mapNotNull { line ->
             line.split('=', limit = 2).takeIf { it.size == 2 }?.let { it[0] to it[1] }
         }.toMap()
-        "${fields["ip"] ?: "?"}, country ${fields["loc"] ?: "?"}"
-    }.getOrElse { "unknown (${describe(it)})" }
+        val country = fields["loc"]?.takeIf { it.length == 2 }
+        "${fields["ip"] ?: "?"}, country ${country ?: "?"}" to country
+    }.getOrElse { "unknown (${describe(it)})" to null }
 
     /**
      * Downloads up to [SPEED_TEST_BYTES] from Cloudflare's speed test (no account; nothing about
@@ -115,7 +126,8 @@ object NetCheck {
 
     private fun testStream(channel: Channel, out: StringBuilder) {
         var url = URL(channel.url)
-        out.appendLine("  DNS ${url.host}: ${resolve(url.host)}")
+        val seen = mutableSetOf<String>()
+        describeHost(url, seen, out)
         // Follow redirects by hand so each hop shows.
         var response: Response? = null
         for (hop in 0 until 6) {
@@ -124,7 +136,7 @@ object NetCheck {
             out.appendLine("  ${url.host}: HTTP ${r.code} (${r.ms} ms)")
             if (r.code in 300..399 && r.location != null) {
                 url = URL(url, r.location)
-                if (hop == 0) out.appendLine("  DNS ${url.host}: ${resolve(url.host)}")
+                describeHost(url, seen, out)
                 continue
             }
             response = r
@@ -143,6 +155,7 @@ object NetCheck {
         val variant = lowestVariant(r.body)
         val media = if (variant != null) {
             val variantUrl = URL(url, variant)
+            describeHost(variantUrl, seen, out)
             val v = get(variantUrl, channel.userAgent, channel.referrer, 512 * 1024)
             out.appendLine("  variant ${variantUrl.host}: HTTP ${v.code} (${v.ms} ms)")
             if (v.code != 200) { out.appendLine("  ${verdict(v.code)}"); return }
@@ -154,6 +167,7 @@ object NetCheck {
         val segment = media.lines().map { it.trim() }.lastOrNull { it.isNotEmpty() && !it.startsWith("#") }
             ?: run { out.appendLine("  playlist has no segments"); return }
         val segUrl = URL(url, segment)
+        describeHost(segUrl, seen, out)
         val s = get(segUrl, channel.userAgent, channel.referrer, 2 * 1024 * 1024)
         val kbps = if (s.ms > 0) s.bytes * 8 / s.ms else 0
         out.appendLine("  segment ${segUrl.host}: HTTP ${s.code} (${s.bytes / 1024} KB in ${s.ms} ms, about $kbps kbit/s)")
@@ -179,7 +193,9 @@ object NetCheck {
 
     private fun verdict(code: Int): String = when (code) {
         401, 403 -> "Refused: the server blocks this connection (often by location or network type)."
-        404, 410 -> "Not found: the stream address has changed or expired. Update the playlist."
+        404 -> "Not found: the stream address has changed or expired. Update the playlist."
+        410 -> "Gone: the address or session has expired, or the server blocks this connection. " +
+            "If it plays on Wi-Fi, see the 'new connection' times above."
         in 500..599 -> "The server had an error. Try again later."
         else -> "Unexpected answer."
     }
@@ -190,6 +206,65 @@ object NetCheck {
         val ms = System.currentTimeMillis() - start
         addresses.take(3).joinToString(", ") { it.hostAddress.orEmpty() } + " ($ms ms)"
     }.getOrElse { "failed (${describe(it)})" }
+
+    /**
+     * For each new host: the car modem's DNS answer, Cloudflare's DNS-over-HTTPS answer, and how
+     * long a fresh TCP connection and TLS handshake take. On the car's internet a new connection
+     * has taken 8 to 24 s while a reused one took under 1 s; this shows which step is slow.
+     */
+    private fun describeHost(url: URL, seen: MutableSet<String>, out: StringBuilder) {
+        if (!seen.add(url.host)) return
+        out.appendLine("  ${url.host}")
+        out.appendLine("    DNS: ${resolve(url.host)}")
+        out.appendLine("    DNS via Cloudflare 1.1.1.1: ${resolveDoh(url.host)}")
+        out.appendLine("    new connection: ${handshake(url)}")
+    }
+
+    /** Times a fresh TCP connect and (for https) TLS handshake to [url]'s host, nothing sent. */
+    private fun handshake(url: URL): String = runCatching {
+        val port = if (url.port > 0) url.port else url.defaultPort
+        val address = InetAddress.getByName(url.host)
+        val socket = java.net.Socket()
+        try {
+            val t0 = System.currentTimeMillis()
+            socket.connect(java.net.InetSocketAddress(address, port), 20_000)
+            val tcp = System.currentTimeMillis() - t0
+            if (url.protocol != "https") return@runCatching "TCP $tcp ms (${address.hostAddress})"
+            val factory = javax.net.ssl.SSLSocketFactory.getDefault() as javax.net.ssl.SSLSocketFactory
+            val ssl = factory.createSocket(socket, url.host, port, true) as javax.net.ssl.SSLSocket
+            ssl.soTimeout = 20_000
+            val t1 = System.currentTimeMillis()
+            ssl.use { it.startHandshake() }
+            "TCP $tcp ms, TLS ${System.currentTimeMillis() - t1} ms (${address.hostAddress})"
+        } finally {
+            runCatching { socket.close() }
+        }
+    }.getOrElse { "failed (${describe(it)})" }
+
+    /**
+     * The same lookup through Cloudflare's DNS over HTTPS, bypassing the car modem's DNS. If it
+     * gives the same addresses as [resolve], DNS isn't why a station fails on this connection.
+     */
+    private fun resolveDoh(host: String): String = runCatching {
+        val start = System.currentTimeMillis()
+        val c = URL("https://cloudflare-dns.com/dns-query?name=$host&type=A").openConnection() as HttpURLConnection
+        c.connectTimeout = 10_000
+        c.readTimeout = 10_000
+        c.setRequestProperty("Accept", "application/dns-json")
+        val body = try {
+            if (c.responseCode != 200) return@runCatching "failed (HTTP ${c.responseCode})"
+            c.inputStream.use { it.readBytes().toString(Charsets.UTF_8) }
+        } finally {
+            c.disconnect()
+        }
+        val ms = System.currentTimeMillis() - start
+        dohAddresses(body).take(3).joinToString(", ").ifEmpty { "no addresses" } + " ($ms ms)"
+    }.getOrElse { "failed (${describe(it)})" }
+
+    /** IPv4 addresses (type 1 answers) in a DNS-over-HTTPS JSON reply. */
+    internal fun dohAddresses(json: String): List<String> =
+        Regex(""""type"\s*:\s*1\s*,[^}]*?"data"\s*:\s*"([0-9.]+)"""").findAll(json)
+            .map { it.groupValues[1] }.toList()
 
     private class Response(val code: Int, val location: String?, val body: String, val bytes: Long, val ms: Long)
 

@@ -1728,15 +1728,19 @@ class MainActivity : ComponentActivity() {
 
     /**
      * A plain-language next step for an error. A refusal (HTTP 401/403) on the car's internet is
-     * usually the broadcaster blocking that network: suggest a hotspot.
+     * usually the broadcaster blocking that network: suggest a hotspot. StreamTheWorld (GOLD 104.3,
+     * KIIS, Triple M) answers HTTP 410 on the car's internet while the same address plays on Wi-Fi:
+     * a block, or its session expiring while the car's slow connections open. Hedged hint.
      */
     private fun hintFor(text: String): String {
         val refused = text.contains("HTTP 403") || text.contains("HTTP 401")
-        if (!refused) return ""
+        val gone = text.contains("HTTP 410")
+        if (!refused && !gone) return ""
         val channel = currentChannel ?: return ""
         return when {
-            netKind == NetKind.CAR -> " This channel blocks the car's internet. Use a phone hotspot or Wi-Fi for it."
-            else -> ""
+            netKind != NetKind.CAR -> ""
+            refused -> " This channel blocks the car's internet. Use a phone hotspot or Wi-Fi for it."
+            else -> " If it plays on Wi-Fi, the car's internet is the problem (too slow to connect, or blocked). Use a phone hotspot for it."
         }
     }
 
