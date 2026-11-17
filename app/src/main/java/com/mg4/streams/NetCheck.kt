@@ -40,15 +40,8 @@ object NetCheck {
         }
         out.appendLine()
         out.appendLine("Stream: ${channel.name}")
-        runCatching { testStream(channel, channel.url, out) }
+        runCatching { testStream(channel, out) }
             .onFailure { out.appendLine("  stopped: ${describe(it)}") }
-        // A numbered StreamTheWorld server: also try Triton's load balancer, which picks a server.
-        StreamTheWorld.redirectFor(channel.url)?.let { balanced ->
-            out.appendLine()
-            out.appendLine("Same station through StreamTheWorld's load balancer:")
-            runCatching { testStream(channel, balanced, out) }
-                .onFailure { out.appendLine("  stopped: ${describe(it)}") }
-        }
         return out.toString()
     }
 
@@ -131,10 +124,10 @@ object NetCheck {
     private const val SPEED_TEST_BYTES = 1_000_000
     private const val SPEED_TEST_MS = 8_000L
 
-    private fun testStream(channel: Channel, address: String, out: StringBuilder) {
-        var url = URL(address)
-        out.appendLine("  DNS ${url.host}: ${resolve(url.host)}")
-        out.appendLine("  DNS ${url.host} via Cloudflare 1.1.1.1: ${resolveDoh(url.host)}")
+    private fun testStream(channel: Channel, out: StringBuilder) {
+        var url = URL(channel.url)
+        val seen = mutableSetOf<String>()
+        describeHost(url, seen, out)
         // Follow redirects by hand so each hop shows.
         var response: Response? = null
         for (hop in 0 until 6) {
@@ -143,7 +136,7 @@ object NetCheck {
             out.appendLine("  ${url.host}: HTTP ${r.code} (${r.ms} ms)")
             if (r.code in 300..399 && r.location != null) {
                 url = URL(url, r.location)
-                if (hop == 0) out.appendLine("  DNS ${url.host}: ${resolve(url.host)}")
+                describeHost(url, seen, out)
                 continue
             }
             response = r
@@ -162,6 +155,7 @@ object NetCheck {
         val variant = lowestVariant(r.body)
         val media = if (variant != null) {
             val variantUrl = URL(url, variant)
+            describeHost(variantUrl, seen, out)
             val v = get(variantUrl, channel.userAgent, channel.referrer, 512 * 1024)
             out.appendLine("  variant ${variantUrl.host}: HTTP ${v.code} (${v.ms} ms)")
             if (v.code != 200) { out.appendLine("  ${verdict(v.code)}"); return }
@@ -173,6 +167,7 @@ object NetCheck {
         val segment = media.lines().map { it.trim() }.lastOrNull { it.isNotEmpty() && !it.startsWith("#") }
             ?: run { out.appendLine("  playlist has no segments"); return }
         val segUrl = URL(url, segment)
+        describeHost(segUrl, seen, out)
         val s = get(segUrl, channel.userAgent, channel.referrer, 2 * 1024 * 1024)
         val kbps = if (s.ms > 0) s.bytes * 8 / s.ms else 0
         out.appendLine("  segment ${segUrl.host}: HTTP ${s.code} (${s.bytes / 1024} KB in ${s.ms} ms, about $kbps kbit/s)")
@@ -199,8 +194,8 @@ object NetCheck {
     private fun verdict(code: Int): String = when (code) {
         401, 403 -> "Refused: the server blocks this connection (often by location or network type)."
         404 -> "Not found: the stream address has changed or expired. Update the playlist."
-        410 -> "Gone: the address has expired, or the server blocks this connection (StreamTheWorld " +
-            "does this on the car's internet). If it plays on Wi-Fi, use a hotspot for it."
+        410 -> "Gone: the address or session has expired, or the server blocks this connection. " +
+            "If it plays on Wi-Fi, see the 'new connection' times above."
         in 500..599 -> "The server had an error. Try again later."
         else -> "Unexpected answer."
     }
@@ -210,6 +205,40 @@ object NetCheck {
         val addresses = InetAddress.getAllByName(host)
         val ms = System.currentTimeMillis() - start
         addresses.take(3).joinToString(", ") { it.hostAddress.orEmpty() } + " ($ms ms)"
+    }.getOrElse { "failed (${describe(it)})" }
+
+    /**
+     * For each new host: the car modem's DNS answer, Cloudflare's DNS-over-HTTPS answer, and how
+     * long a fresh TCP connection and TLS handshake take. On the car's internet a new connection
+     * has taken 8 to 24 s while a reused one took under 1 s; this shows which step is slow.
+     */
+    private fun describeHost(url: URL, seen: MutableSet<String>, out: StringBuilder) {
+        if (!seen.add(url.host)) return
+        out.appendLine("  ${url.host}")
+        out.appendLine("    DNS: ${resolve(url.host)}")
+        out.appendLine("    DNS via Cloudflare 1.1.1.1: ${resolveDoh(url.host)}")
+        out.appendLine("    new connection: ${handshake(url)}")
+    }
+
+    /** Times a fresh TCP connect and (for https) TLS handshake to [url]'s host, nothing sent. */
+    private fun handshake(url: URL): String = runCatching {
+        val port = if (url.port > 0) url.port else url.defaultPort
+        val address = InetAddress.getByName(url.host)
+        val socket = java.net.Socket()
+        try {
+            val t0 = System.currentTimeMillis()
+            socket.connect(java.net.InetSocketAddress(address, port), 20_000)
+            val tcp = System.currentTimeMillis() - t0
+            if (url.protocol != "https") return@runCatching "TCP $tcp ms (${address.hostAddress})"
+            val factory = javax.net.ssl.SSLSocketFactory.getDefault() as javax.net.ssl.SSLSocketFactory
+            val ssl = factory.createSocket(socket, url.host, port, true) as javax.net.ssl.SSLSocket
+            ssl.soTimeout = 20_000
+            val t1 = System.currentTimeMillis()
+            ssl.use { it.startHandshake() }
+            "TCP $tcp ms, TLS ${System.currentTimeMillis() - t1} ms (${address.hostAddress})"
+        } finally {
+            runCatching { socket.close() }
+        }
     }.getOrElse { "failed (${describe(it)})" }
 
     /**
