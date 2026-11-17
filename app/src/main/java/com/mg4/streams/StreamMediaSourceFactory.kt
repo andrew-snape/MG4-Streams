@@ -62,7 +62,8 @@ class StreamMediaSourceFactory(private val context: Context) : MediaSource.Facto
             .setReadTimeoutMs(READ_TIMEOUT_MS)
         agent?.let { http.setUserAgent(it) }
         referrer?.let { http.setDefaultRequestProperties(mapOf("Referer" to it)) }
-        val dataSource = DefaultDataSource.Factory(context, http)
+        // Retired StreamTheWorld servers (HTTP 410) fall back to Triton's load balancer.
+        val dataSource = DefaultDataSource.Factory(context, FallbackDataSource.Factory(http))
 
         val local = mediaItem.localConfiguration
         val isHls = local != null &&
