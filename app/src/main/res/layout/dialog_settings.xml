@@ -163,6 +163,12 @@
             android:layout_height="88dp"
             android:text="Network check (tests the station on screen)" />
 
+        <Button
+            android:id="@+id/relayButton"
+            android:layout_width="match_parent"
+            android:layout_height="88dp"
+            android:text="Tailscale relay (Australian address on the car's internet)" />
+
         <TextView
             android:id="@+id/versionText"
             android:layout_width="match_parent"

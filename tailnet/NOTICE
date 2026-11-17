@@ -1,0 +1,13 @@
+mg4tailnet: embedded Tailscale node for MG4 Streams (MIT, see ../LICENSE).
+
+Third-party code:
+
+- Tailscale (tailscale.com), BSD-3-Clause, Copyright (c) Tailscale Inc & AUTHORS.
+  Linked into the app through gomobile (app/libs/mg4-tailnet.aar).
+
+- Parts of node.go (tsnet setup, log-policy directory, auth-key sign-in sequence) are adapted
+  from NovaScale for Android, native/nova-tailnet-go
+  (https://github.com/GalaxNet-Ltd/novascale-android), Copyright (C) 2026 NovaScale
+  contributors, licensed under the Apache License, Version 2.0
+  (https://www.apache.org/licenses/LICENSE-2.0). Changes: reduced to one node with a
+  status-polling API, exit-node selection added, proxy rewritten (proxy.go is original).

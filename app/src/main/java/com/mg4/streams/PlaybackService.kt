@@ -209,6 +209,7 @@ class PlaybackService : MediaSessionService() {
 
     override fun onCreate() {
         super.onCreate()
+        Tailnet.install(this) // before the player makes its first request
         // Media/music audio attributes with audio focus handling: starting a station asks the
         // system for audio focus, so other media (FM, Bluetooth, other apps) pauses or stops.
         // If another app takes focus, this player pauses; it resumes after a short interruption.

@@ -20,3 +20,7 @@ captures/
 *.jks
 *.keystore
 
+
+# Built from tailnet/ by scripts/build-tailnet-aar.sh
+app/libs/*.aar
+tailnet/.tools/

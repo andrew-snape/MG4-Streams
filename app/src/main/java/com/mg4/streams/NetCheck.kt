@@ -21,12 +21,13 @@ object NetCheck {
     fun run(context: Context, channel: Channel?): String {
         val out = StringBuilder()
         out.appendLine("Connection: ${describeNetwork(context)}")
+        out.appendLine("Tailscale relay: ${Tailnet.describeForNetCheck()}")
         val (address, country) = publicAddress()
         out.appendLine("Public address: $address")
         if (country != null && country != "AU") {
             out.appendLine(
                 "  The internet sees this connection as outside Australia ($country). Australian " +
-                    "stations and TV (StreamTheWorld, Seven) can refuse it: use a hotspot or a relay."
+                    "stations and TV (StreamTheWorld, Seven) can refuse it: use a hotspot or Settings > Tailscale relay."
             )
         }
         out.appendLine("Download speed: ${speedTest()}")

@@ -23,6 +23,12 @@ android {
         buildConfig = true
     }
 
+    packaging {
+        // Compress native libraries in the APK (they're extracted at install). The embedded
+        // Tailscale node is about 21 MB per ABI uncompressed; compressed, updates stay smaller.
+        jniLibs { useLegacyPackaging = true }
+    }
+
     lint {
         // Head unit is Android 9 (API 28) and the app isn't on Google Play.
         disable += "ExpiredTargetSdkVersion"
@@ -59,6 +65,8 @@ dependencies {
     // Jellyfin's prebuilt Media3 extension; its version must match the Media3 version above.
     implementation("org.jellyfin.media3:media3-ffmpeg-decoder:1.5.0+1")
     implementation("androidx.core:core-ktx:1.13.1")
+    // Embedded Tailscale node (Go, tsnet) for the relay; built by scripts/build-tailnet-aar.sh.
+    implementation(files("libs/mg4-tailnet.aar"))
     implementation("com.google.guava:guava:33.2.1-android")
     testImplementation("junit:junit:4.13.2")
 }

@@ -250,6 +250,10 @@ class MainActivity : ComponentActivity() {
         uri?.let { importUrlList(it, importSlot) }
     }
 
+    private val openAuthKey = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let { signInWithKeyFile(it) }
+    }
+
     private val updater by lazy { Updater(applicationContext) }
     private var updateRunning = false
     /** Update check and download, so they never hold up playlist work on [worker]. */
@@ -337,6 +341,7 @@ class MainActivity : ComponentActivity() {
         onBackPressedDispatcher.addCallback(this, backCallback)
 
         prefs = getSharedPreferences("mg4_streams", Context.MODE_PRIVATE)
+        Tailnet.install(this)
         slotFiles = mapOf(
             Tab.RADIO to File(filesDir, "radio.m3u"),
             Tab.TV to File(filesDir, "tv.m3u"),
@@ -1225,9 +1230,128 @@ class MainActivity : ComponentActivity() {
             dialog.dismiss()
             runNetworkCheck()
         }
+        view.findViewById<Button>(R.id.relayButton).setOnClickListener {
+            dialog.dismiss()
+            showRelay()
+        }
         dialog.setOnDismissListener { settingsDialog = null }
         settingsDialog = dialog
         dialog.show()
+    }
+
+    // ---- Tailscale relay -----------------------------------------------------------------------
+
+    /**
+     * Settings > Tailscale relay: mode, sign-in, exit node and live status. See [Tailnet].
+     * The status line refreshes every second while the dialog is open.
+     */
+    private fun showRelay() {
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(32, 8, 32, 8) }
+        val statusText = TextView(this).apply {
+            textSize = 20f
+            setTextColor(getColor(R.color.text))
+            setPadding(0, 8, 0, 16)
+            setTextIsSelectable(true)
+        }
+        fun button(label: String, onClick: (Button) -> Unit) = Button(this).apply {
+            text = label
+            textSize = 20f
+            setOnClickListener { onClick(this) }
+            box.addView(this, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 88))
+        }
+        fun done(what: String): (String?) -> Unit = { error ->
+            runOnUiThread {
+                if (error != null && !isDestroyed) Toast.makeText(this, "$what: $error", Toast.LENGTH_LONG).show()
+            }
+        }
+        box.addView(statusText)
+        val modeButton = button("") { b ->
+            val next = Tailnet.Mode.values().let { it[(Tailnet.mode.ordinal + 1) % it.size] }
+            Tailnet.setMode(next)
+            b.text = "Use relay: ${next.label}"
+        }
+        modeButton.text = "Use relay: ${Tailnet.mode.label}"
+        button("Sign in (shows a link to open on your phone)") {
+            if (Tailnet.mode == Tailnet.Mode.OFF) Tailnet.setMode(Tailnet.Mode.CAR).also {
+                modeButton.text = "Use relay: ${Tailnet.Mode.CAR.label}"
+            }
+            Tailnet.login(done("Sign-in"))
+        }
+        button("Sign in with an auth key file (USB)") {
+            openAuthKey.launch(arrayOf("text/*", "application/octet-stream"))
+        }
+        val exitButton = button("") { pickExitNode(it) }
+        exitButton.text = "Exit node: ${Tailnet.exitNodeName.ifEmpty { "choose..." }}"
+        button("Sign out of Tailscale") { Tailnet.logout(done("Sign-out")) }
+
+        fun render() {
+            val s = Tailnet.status
+            statusText.text = buildString {
+                append("Status: ${s.state}")
+                if (s.self.isNotEmpty()) append(" as ${s.self}")
+                if (s.exitNode.isNotEmpty()) append("\nExit node: ${s.exitNode} (${if (s.exitOnline) "online" else "offline"})")
+                append("\n").append(if (s.usable) "Relay ready." else "Relay not in use: stations connect directly.")
+                if (s.loginUrl.isNotEmpty()) append("\n\nOpen this on your phone to sign in:\n${s.loginUrl}")
+                if (s.error.isNotEmpty()) append("\n\n${s.error}")
+            }
+        }
+        val ticker = object : Runnable {
+            override fun run() {
+                render()
+                handler.postDelayed(this, 1000)
+            }
+        }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Tailscale relay")
+            .setView(android.widget.ScrollView(this).apply { addView(box) })
+            .setPositiveButton("Close", null)
+            .create()
+        dialog.setOnDismissListener { handler.removeCallbacks(ticker) }
+        dialog.show()
+        ticker.run()
+    }
+
+    private fun pickExitNode(button: Button) {
+        Tailnet.exitNodes { nodes, error ->
+            runOnUiThread {
+                if (isDestroyed) return@runOnUiThread
+                if (nodes.isEmpty()) {
+                    Toast.makeText(this, error ?: "No exit nodes yet. Sign in, and turn on \"Run as exit node\" on a computer at home.", Toast.LENGTH_LONG).show()
+                    return@runOnUiThread
+                }
+                val labels = nodes.map { "${it.name}${if (it.online) "" else " (offline)"}${if (it.active) "  ✓" else ""}" }
+                AlertDialog.Builder(this)
+                    .setTitle("Exit node (a computer at home)")
+                    .setItems(labels.toTypedArray()) { _, i ->
+                        val name = nodes[i].name
+                        button.text = "Exit node: $name"
+                        Tailnet.setExitNode(name) { err ->
+                            runOnUiThread { if (err != null) Toast.makeText(this, "Exit node: $err", Toast.LENGTH_LONG).show() }
+                        }
+                    }
+                    .show()
+            }
+        }
+    }
+
+    /** Reads an auth key (tskey-...) from a text file and signs in with it. The key isn't kept. */
+    private fun signInWithKeyFile(uri: Uri) {
+        worker.execute {
+            val key = runCatching {
+                contentResolver.openInputStream(uri)?.use { readCapped(it) }.orEmpty()
+                    .lineSequence().map { it.trim() }.firstOrNull { it.startsWith("tskey-") }
+            }.getOrNull()
+            if (key == null) {
+                runOnUiThread { Toast.makeText(this, "No auth key (tskey-...) found in that file.", Toast.LENGTH_LONG).show() }
+                return@execute
+            }
+            if (Tailnet.mode == Tailnet.Mode.OFF) Tailnet.setMode(Tailnet.Mode.CAR)
+            Tailnet.loginWithKey(key) { err ->
+                runOnUiThread {
+                    Toast.makeText(this, err?.let { "Sign-in: $it" } ?: "Signed in to Tailscale. Now choose the exit node.", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
     }
 
     // ---- Network check -----------------------------------------------------------------------

@@ -58,6 +58,10 @@ if [[ -z "$NOTES" && $PUBLISH == 1 ]]; then read -r -p "Release notes (one line)
 # 3. Test (and for --local, build and sign). Clean first: iCloud leaves " 2" copies in build/.
 rm -rf app/build
 python3 scripts/check_public_tree.py
+# The Tailscale relay library (Go) isn't in git: build it if missing or older than its source.
+if [[ ! -f app/libs/mg4-tailnet.aar || -n "$(find tailnet -name '*.go' -newer app/libs/mg4-tailnet.aar -o -name 'go.sum' -newer app/libs/mg4-tailnet.aar | head -1)" ]]; then
+  scripts/build-tailnet-aar.sh
+fi
 if [[ $LOCAL == 0 ]]; then
   ./gradlew --no-daemon -q testDebugUnitTest lintDebug
 else

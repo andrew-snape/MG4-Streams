@@ -97,7 +97,15 @@ jobs:
           java-version: '17'
       - uses: android-actions/setup-android@v4
         with:
-          packages: platform-tools platforms;android-35 build-tools;34.0.0
+          packages: platform-tools platforms;android-35 build-tools;34.0.0 ndk;28.2.13676358
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: tailnet/go.mod
+          cache-dependency-path: tailnet/go.sum
+      - name: Tailscale relay library (Go, gomobile)
+        run: |
+          (cd tailnet && go test ./...)
+          scripts/build-tailnet-aar.sh
       - uses: gradle/actions/setup-gradle@v6
       - name: Test and build the release APK
         run: ./gradlew testDebugUnitTest assembleRelease --stacktrace

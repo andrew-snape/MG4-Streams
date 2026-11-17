@@ -25,6 +25,19 @@ Unofficial. Not affiliated with MG or SAIC. Use at your own risk.
 - **Album art:** for songs ("Artist - Song" stream titles) the cover is looked up on Apple's iTunes Search and shown instead of the logo, and in the media notification. Only the song title is sent. Off switch in Settings.
 - **Remembers** the last station and resumes it on start (on by default; never TV). Night dim from 7 pm to 6 am.
 
+## Tailscale relay
+
+The car's own modem reaches the internet through Germany, so Australian stations (StreamTheWorld radio, Seven) refuse it. Settings > **Tailscale relay** runs a Tailscale node inside the app (no VPN permission, no separate app) and sends the app's traffic through an **exit node** at home, so stations see your home address.
+
+1. On a computer at home, turn on Tailscale's **Run as exit node** and approve it in the admin console.
+2. In the app: **Sign in** shows a link to open on your phone. Or put an auth key (`tskey-...`, non-ephemeral, expiry off) in a `.txt` file on a USB stick and choose **Sign in with an auth key file**.
+3. Choose the **Exit node**, and set **Use relay** to *On car internet only* or *Always* (it starts Off; signing in turns on *On car internet only*).
+4. In the admin console, turn off **key expiry** for the `mg4-streams` machine, or it stops working after 180 days.
+
+If the relay isn't running or the exit node is offline, stations connect directly. Network check shows whether the relay is in use and the country the internet sees. The relay fixes the location, not the speed: traffic still goes through the car modem (and Germany) to reach home.
+
+Building it needs Go and the NDK: `scripts/build-tailnet-aar.sh` makes `app/libs/mg4-tailnet.aar` (release.sh and CI do this). `cd tailnet && go run ./cmd/probe -exit <name>` checks the routing from a Mac.
+
 ## Safety
 
 - Video plays only when the gear reads **P**. It fails closed: an unknown, unreadable or stale gear reading means no video. Audio is never blocked.
