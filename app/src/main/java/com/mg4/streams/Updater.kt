@@ -7,12 +7,15 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
+import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Environment
 import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /**
  * Updates the app from the latest GitHub release of [BuildConfig.UPDATE_REPO].
@@ -88,6 +91,10 @@ class Updater(private val context: Context) {
             .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
             .addRequestHeader("User-Agent", "MG4Streams-updater")
         request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, name)
+        // Without this the file isn't in the media index until the media scan at the next boot,
+        // and the head unit's Downloads lists it but won't open it (fine after a restart).
+        @Suppress("DEPRECATION")
+        request.allowScanningByMediaScanner()
         val id = downloads.enqueue(request)
 
         val started = System.currentTimeMillis()
@@ -103,7 +110,9 @@ class Updater(private val context: Context) {
                         val path = cursor.getString(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_LOCAL_URI))
                             ?.let { Uri.parse(it).path }
                             ?: throw IllegalStateException("the download has no file")
-                        return Download(id, File(path))
+                        val file = File(path)
+                        scan(file)
+                        return Download(id, file)
                     }
                     DownloadManager.STATUS_FAILED -> {
                         val reason = cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_REASON))
@@ -128,6 +137,18 @@ class Updater(private val context: Context) {
                 downloads.remove(id)
                 throw IllegalStateException("download took too long")
             }
+        }
+    }
+
+    /**
+     * Adds [file] to the media index as an APK and waits (up to [SCAN_WAIT_MS]) until it is, so
+     * it can be opened from Downloads straight away.
+     */
+    private fun scan(file: File) {
+        val done = CountDownLatch(1)
+        runCatching {
+            MediaScannerConnection.scanFile(context, arrayOf(file.path), arrayOf(APK_MIME)) { _, _ -> done.countDown() }
+            done.await(SCAN_WAIT_MS, TimeUnit.MILLISECONDS)
         }
     }
 
@@ -205,6 +226,7 @@ class Updater(private val context: Context) {
         private const val TITLE_PREFIX = "MG4 Streams "
         private const val MAX_APK_BYTES = 100L * 1024 * 1024
         private const val POLL_MS = 500L
+        private const val SCAN_WAIT_MS = 10_000L
         private const val MAX_DOWNLOAD_MS = 15 * 60_000L
 
         /** "MG4Streams-0.3.0.apk" for tag "v0.3.0". Only safe file-name characters are kept. */
