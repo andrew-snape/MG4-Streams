@@ -179,7 +179,9 @@ object NetCheck {
 
     private fun verdict(code: Int): String = when (code) {
         401, 403 -> "Refused: the server blocks this connection (often by location or network type)."
-        404, 410 -> "Not found: the stream address has changed or expired. Update the playlist."
+        404 -> "Not found: the stream address has changed or expired. Update the playlist."
+        410 -> "Gone: the address has expired, or the server blocks this connection (StreamTheWorld " +
+            "does this on the car's internet). If it plays on Wi-Fi, use a hotspot for it."
         in 500..599 -> "The server had an error. Try again later."
         else -> "Unexpected answer."
     }
