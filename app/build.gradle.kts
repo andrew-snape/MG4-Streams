@@ -11,8 +11,8 @@ android {
         applicationId = "com.mg4.streams"
         minSdk = 28
         targetSdk = 28
-        versionCode = 14
-        versionName = "0.7.0"
+        versionCode = 15
+        versionName = "0.7.1"
         // The head unit is ARM (MediaTek MT2712); drop the x86 copies of the FFmpeg library.
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
         // GitHub "owner/repo" the in-app updater checks for releases. Change it in a fork.
