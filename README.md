@@ -25,6 +25,14 @@ Unofficial. Not affiliated with MG or SAIC. Use at your own risk.
 - **Album art:** for songs ("Artist - Song" stream titles) the cover is looked up on Apple's iTunes Search and shown instead of the logo, and in the media notification. Only the song title is sent. Off switch in Settings.
 - **Remembers** the last station and resumes it on start (on by default; never TV). Night dim from 7 pm to 6 am.
 
+## Screenshots
+
+Taken on an Android 9 emulator set to the head unit's 1778 × 720 screen at 160 dpi, with fictional stations and shows and a local test stream and test video (colour bars). The car's gear is faked as P so video is allowed, and a folder on the emulator's storage stands in for a USB stick. Not shown: the real car, real station logos, the TV guide, Settings, and the Simple driving screen.
+
+| Radio | TV (parked) | USB |
+|---|---|---|
+| ![Radio](docs/screenshots/radio.png) | ![TV](docs/screenshots/tv.png) | ![USB](docs/screenshots/usb.png) |
+
 ## Tailscale relay
 
 The car's own modem reaches the internet through Germany, so Australian stations (StreamTheWorld radio, Seven) refuse it. Settings > **Tailscale relay** runs a Tailscale node inside the app (no VPN permission, no separate app) and sends the app's traffic through an **exit node** at home, so stations see your home address.
