@@ -72,6 +72,9 @@ object Tailnet {
 
     @Volatile var status = Status()
         private set
+    /** Times Android replaced our default [ProxySelector] and [ensureSelector] put it back. */
+    @Volatile var selectorResets = 0
+        private set
     /** Connection the head unit is using, refreshed with the status (for [Mode.CAR]). */
     @Volatile private var onCarInternet = false
 
@@ -85,8 +88,32 @@ object Tailnet {
         installed = true
         app = context.applicationContext
         prefs = app.getSharedPreferences("mg4_streams", Context.MODE_PRIVATE)
-        ProxySelector.setDefault(Selector(ProxySelector.getDefault()))
+        ensureSelector()
         if (mode != Mode.OFF) thread.execute { startQuietly() }
+    }
+
+    /**
+     * Android puts its own default [ProxySelector] back whenever the system proxy settings are
+     * re-sent to the app (android.net.Proxy.setHttpProxySystemProperty), which silently sends
+     * everything direct again. Re-checked on every status poll, before the player opens a stream
+     * and in Network check.
+     */
+    @Synchronized
+    fun ensureSelector() {
+        val current = ProxySelector.getDefault()
+        if (current is Selector) return
+        if (selectorWasSet) selectorResets++
+        ProxySelector.setDefault(Selector(current))
+        selectorWasSet = true
+    }
+    private var selectorWasSet = false
+
+    /** True while the app's HTTP is actually asking [Selector]. */
+    val selectorActive: Boolean get() = ProxySelector.getDefault() is Selector
+
+    /** The loopback proxy, whether or not the selector would use it (for Network check's own test). */
+    fun proxyOrNull(): Proxy? = status.proxyPort.takeIf { it > 0 }?.let {
+        Proxy(Proxy.Type.HTTP, InetSocketAddress("127.0.0.1", it))
     }
 
     fun setMode(newMode: Mode) {
@@ -127,12 +154,22 @@ object Tailnet {
         val s = status
         val via = if (s.exitNode.isEmpty()) "no exit node chosen"
         else "exit node ${s.exitNode} ${if (s.exitOnline) "online" else "offline"}"
+        val why = when {
+            !s.running -> "node is ${s.state}"
+            s.exitNode.isEmpty() -> "no exit node active in Tailscale"
+            !s.exitOnline -> "exit node offline"
+            s.proxyPort <= 0 -> "local proxy not running"
+            else -> ""
+        }
         val used = when {
-            !s.usable -> "not in use"
+            !s.usable -> "not in use ($why)"
             mode == Mode.CAR && !onCarInternet -> "not in use on this connection"
             else -> "in use"
         }
-        return "${mode.label.lowercase()}, ${s.state}, $via, $used"
+        val selector = if (selectorActive) "" else ", app proxy setting was reset"
+        val resets = if (selectorResets > 0) ", proxy setting restored $selectorResets time(s)" else ""
+        val error = if (s.error.isNotEmpty()) ", error: ${s.error}" else ""
+        return "${mode.label.lowercase()}, ${s.state}, $via, $used$selector$resets$error"
     }
 
     private fun call(done: (String?) -> Unit, block: (Node) -> Unit) {
@@ -176,6 +213,7 @@ object Tailnet {
 
     /** Never throws: an exception would cancel the scheduled refresh. */
     private fun refresh() {
+        runCatching { ensureSelector() }
         onCarInternet = runCatching { NetKind.current(app) == NetKind.CAR }.getOrDefault(false)
         val n = node ?: return
         status = runCatching {

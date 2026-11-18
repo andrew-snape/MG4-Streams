@@ -16,7 +16,9 @@ import (
 // publicConn pretends a loopback test connection went to a public address.
 type publicConn struct{ net.Conn }
 
-func (publicConn) RemoteAddr() net.Addr { return &net.TCPAddr{IP: net.ParseIP("203.0.113.9"), Port: 80} }
+func (publicConn) RemoteAddr() net.Addr {
+	return &net.TCPAddr{IP: net.ParseIP("203.0.113.9"), Port: 80}
+}
 
 // startOrigin serves raw bytes, like a Shoutcast server answering "ICY 200 OK".
 func startOrigin(t *testing.T, response string) (dialFunc, chan string) {
@@ -175,6 +177,19 @@ func TestRefusesNameResolvingToPrivate(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("status %d", resp.StatusCode)
+	}
+}
+
+func TestDirectRouteIsRefusedDistinctly(t *testing.T) {
+	p, _ := startProxy(func(ctx context.Context, n, a string) (net.Conn, error) { return nil, errDirect })
+	defer p.close()
+	resp, err := clientVia(t, p).Get("http://example.com/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable || resp.Status != "503 Exit Route Not Active" {
+		t.Fatalf("status %q", resp.Status)
 	}
 }
 

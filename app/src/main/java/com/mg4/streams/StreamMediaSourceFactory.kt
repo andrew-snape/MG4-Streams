@@ -51,6 +51,7 @@ class StreamMediaSourceFactory(private val context: Context) : MediaSource.Facto
         intArrayOf(C.CONTENT_TYPE_HLS, C.CONTENT_TYPE_OTHER)
 
     override fun createMediaSource(mediaItem: MediaItem): MediaSource {
+        Tailnet.ensureSelector() // Android may have reset it; the player asks it for every request
         val extras = mediaItem.mediaMetadata.extras
         val agent = extras?.getString(EXTRA_USER_AGENT)?.takeIf { it.isNotBlank() }
         val referrer = extras?.getString(EXTRA_REFERRER)?.takeIf { it.isNotBlank() }

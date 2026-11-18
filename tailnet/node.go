@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -25,6 +26,7 @@ import (
 	"sync"
 	"time"
 
+	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"tailscale.com/client/local"
 	"tailscale.com/envknob"
 	"tailscale.com/ipn"
@@ -318,12 +320,27 @@ func (n *Node) StartProxy() (int, error) {
 	if n.proxy != nil {
 		return n.proxy.port(), nil
 	}
-	p, err := startProxy(n.server.Dial)
+	p, err := startProxy(n.dialViaTailnet)
 	if err != nil {
 		return 0, err
 	}
 	n.proxy = p
 	return p.port(), nil
+}
+
+// dialViaTailnet dials through the node and fails closed: tsnet sends a public address through
+// netstack (a *gonet.TCPConn) only while an exit route is active; otherwise it quietly dials
+// straight from the car's internet, which is exactly what the relay is there to avoid.
+func (n *Node) dialViaTailnet(ctx context.Context, network, address string) (net.Conn, error) {
+	c, err := n.server.Dial(ctx, network, address)
+	if err != nil {
+		return nil, err
+	}
+	if _, viaTailnet := c.(*gonet.TCPConn); !viaTailnet {
+		_ = c.Close()
+		return nil, errDirect
+	}
+	return c, nil
 }
 
 // Close stops the proxy and the node. The node can't be restarted; make a new one.

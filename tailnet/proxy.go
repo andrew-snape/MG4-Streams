@@ -131,9 +131,13 @@ func (p *proxy) serve(client net.Conn) {
 	upstream, err := p.dialPublic(ctx, target)
 	cancel()
 	if err != nil {
-		if errors.Is(err, errNotPublic) {
+		switch {
+		case errors.Is(err, errNotPublic):
 			reply(client, http.StatusForbidden)
-		} else {
+		case errors.Is(err, errDirect):
+			// Distinct status so Network check can say the exit route isn't active.
+			replyReason(client, http.StatusServiceUnavailable, "Exit Route Not Active")
+		default:
 			reply(client, http.StatusBadGateway)
 		}
 		return
@@ -187,6 +191,10 @@ func splice(client net.Conn, clientReader io.Reader, upstream net.Conn) {
 
 var errNotPublic = errors.New("destination is not a public internet address")
 
+// errDirect: the node would have connected straight from the car's own internet instead of
+// through the exit node (no exit route active yet). Refused, so "via the relay" always means it.
+var errDirect = errors.New("not routed through the exit node")
+
 func (p *proxy) dialPublic(ctx context.Context, target string) (net.Conn, error) {
 	host, _, err := net.SplitHostPort(target)
 	if err != nil {
@@ -224,7 +232,9 @@ func isPublic(a netip.Addr) bool {
 		!cgnat.Contains(a) && !tailscaleULA.Contains(a) && !benchmarkNets.Contains(a)
 }
 
-func reply(w io.Writer, code int) {
-	_, _ = io.WriteString(w, "HTTP/1.1 "+strconv.Itoa(code)+" "+http.StatusText(code)+"\r\n")
+func reply(w io.Writer, code int) { replyReason(w, code, http.StatusText(code)) }
+
+func replyReason(w io.Writer, code int, reason string) {
+	_, _ = io.WriteString(w, "HTTP/1.1 "+strconv.Itoa(code)+" "+reason+"\r\n")
 	_, _ = io.WriteString(w, "Content-Length: 0\r\nConnection: close\r\n\r\n")
 }

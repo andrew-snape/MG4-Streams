@@ -20,10 +20,12 @@ object NetCheck {
 
     fun run(context: Context, channel: Channel?): String {
         val out = StringBuilder()
+        Tailnet.ensureSelector()
         out.appendLine("Connection: ${describeNetwork(context)}")
         out.appendLine("Tailscale relay: ${Tailnet.describeForNetCheck()}")
         val (address, country) = publicAddress()
         out.appendLine("Public address: $address")
+        Tailnet.proxyOrNull()?.let { out.appendLine("Through the relay itself: ${relayAddress(it)}") }
         if (country != null && country != "AU") {
             out.appendLine(
                 "  The internet sees this connection as outside Australia ($country). Australian " +
@@ -79,6 +81,43 @@ object NetCheck {
         val country = fields["loc"]?.takeIf { it.length == 2 }
         "${fields["ip"] ?: "?"}, country ${country ?: "?"}" to country
     }.getOrElse { "unknown (${describe(it)})" to null }
+
+    /**
+     * Cloudflare's trace fetched explicitly through the relay's local proxy, bypassing the app's
+     * proxy choice. If this says AU while "Public address" says DE, the relay works but the app's
+     * requests aren't being sent to it; if this fails or says DE, the relay itself is the problem.
+     * Plain HTTP so the proxy's own answer (e.g. 503 Exit Route Not Active) shows.
+     */
+    private fun relayAddress(proxy: java.net.Proxy): String = runCatching {
+        val c = URL("http://www.cloudflare.com/cdn-cgi/trace").openConnection(proxy) as HttpURLConnection
+        c.connectTimeout = 10_000
+        c.readTimeout = 20_000
+        c.setRequestProperty("User-Agent", "MG4Streams")
+        try {
+            val code = c.responseCode
+            if (code != 200) {
+                val hint = if (code == 503) " (Tailscale has no exit route yet: it would have gone direct, so it refused)" else ""
+                return@runCatching "HTTP $code ${c.responseMessage.orEmpty()}$hint"
+            }
+            val fields = c.inputStream.use { readCapped(it, 4096) }.lines().mapNotNull { line ->
+                line.split('=', limit = 2).takeIf { it.size == 2 }?.let { it[0] to it[1] }
+            }.toMap()
+            "${fields["ip"] ?: "?"}, country ${fields["loc"] ?: "?"}"
+        } finally {
+            c.disconnect()
+        }
+    }.getOrElse { "failed (${describe(it)})" }
+
+    private fun readCapped(input: java.io.InputStream, max: Int): String {
+        val buffer = java.io.ByteArrayOutputStream()
+        val chunk = ByteArray(1024)
+        while (buffer.size() < max) {
+            val n = input.read(chunk)
+            if (n < 0) break
+            buffer.write(chunk, 0, n)
+        }
+        return buffer.toString("UTF-8")
+    }
 
     /**
      * Downloads up to [SPEED_TEST_BYTES] from Cloudflare's speed test (no account; nothing about
